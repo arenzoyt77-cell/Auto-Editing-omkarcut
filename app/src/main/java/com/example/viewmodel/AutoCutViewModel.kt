@@ -734,7 +734,10 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
 
                     val galleryResult = galleryManager.saveVideoToGallery(
                         renderedFile = renderResult.outputFile,
-                        fileName = renderResult.fileName
+                        fileName = renderResult.fileName,
+                        validatedDurationMs = renderResult.renderedDurationMs,
+                        validatedWidth = renderResult.outputWidth,
+                        validatedHeight = renderResult.outputHeight
                     )
 
                     val exportEntity = ExportHistoryEntity(

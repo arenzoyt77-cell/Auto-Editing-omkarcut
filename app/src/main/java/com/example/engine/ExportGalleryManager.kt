@@ -26,24 +26,32 @@ data class GallerySaveResult(
 /**
  * Export & Android Gallery MediaStore Manager.
  *
- * Saves the final rendered MP4 video to the Android Gallery (`Movies/OmkarAutoCut/OMKAR_AUTOCUT_YYYYMMDD_HHMMSS.mp4`)
- * and provides intent launchers to open or share the exported video.
+ * Only inserts validated final MP4 videos into Android MediaStore with accurate
+ * duration, resolution, size, and `video/mp4` MIME type, then triggers MediaScanner
+ * so Android Gallery and Google Photos display the exact duration.
  */
 class ExportGalleryManager(private val context: Context) {
 
     suspend fun saveVideoToGallery(
         renderedFile: File,
-        fileName: String
+        fileName: String,
+        validatedDurationMs: Long = 0L,
+        validatedWidth: Int = 0,
+        validatedHeight: Int = 0
     ): GallerySaveResult = withContext(Dispatchers.IO) {
-        if (!renderedFile.exists() || renderedFile.length() == 0L) {
+        if (!renderedFile.exists() || renderedFile.length() <= 1024L) {
             return@withContext GallerySaveResult(
                 success = false,
                 mediaStoreUri = null,
                 displayPath = "",
                 fileSizeBytes = 0L,
-                errorMessage = "Rendered video file is missing."
+                errorMessage = "Rendered video file is missing or invalid."
             )
         }
+
+        val fileSize = renderedFile.length()
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        val nowMillis = System.currentTimeMillis()
 
         try {
             val resolver = context.contentResolver
@@ -51,8 +59,17 @@ class ExportGalleryManager(private val context: Context) {
                 put(MediaStore.Video.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Video.Media.TITLE, fileName.removeSuffix(".mp4"))
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000L)
-                put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000L)
+                put(MediaStore.Video.Media.DATE_ADDED, nowSeconds)
+                put(MediaStore.Video.Media.DATE_MODIFIED, nowSeconds)
+                put(MediaStore.Video.Media.DATE_TAKEN, nowMillis)
+                put(MediaStore.Video.Media.SIZE, fileSize)
+                if (validatedDurationMs > 0L) {
+                    put(MediaStore.Video.Media.DURATION, validatedDurationMs)
+                }
+                if (validatedWidth > 0 && validatedHeight > 0) {
+                    put(MediaStore.Video.Media.WIDTH, validatedWidth)
+                    put(MediaStore.Video.Media.HEIGHT, validatedHeight)
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(
                         MediaStore.Video.Media.RELATIVE_PATH,
@@ -74,20 +91,33 @@ class ExportGalleryManager(private val context: Context) {
                     FileInputStream(renderedFile).use { input ->
                         input.copyTo(output, bufferSize = 64 * 1024)
                     }
+                    output.flush()
                 }
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val finalizeValues = ContentValues().apply {
                         put(MediaStore.Video.Media.IS_PENDING, 0)
+                        put(MediaStore.Video.Media.SIZE, fileSize)
+                        if (validatedDurationMs > 0L) {
+                            put(MediaStore.Video.Media.DURATION, validatedDurationMs)
+                        }
                     }
                     resolver.update(insertedUri, finalizeValues, null, null)
                 }
+
+                // Trigger MediaScanner so Gallery / Photos immediately refresh metadata
+                MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(renderedFile.absolutePath),
+                    arrayOf("video/mp4"),
+                    null
+                )
 
                 return@withContext GallerySaveResult(
                     success = true,
                     mediaStoreUri = insertedUri,
                     displayPath = "Movies/OmkarAutoCut/$fileName",
-                    fileSizeBytes = renderedFile.length()
+                    fileSizeBytes = fileSize
                 )
             }
 
@@ -100,6 +130,7 @@ class ExportGalleryManager(private val context: Context) {
             FileInputStream(renderedFile).use { input ->
                 FileOutputStream(fallbackFile).use { output ->
                     input.copyTo(output)
+                    output.flush()
                 }
             }
             MediaScannerConnection.scanFile(
@@ -120,7 +151,6 @@ class ExportGalleryManager(private val context: Context) {
                 fileSizeBytes = fallbackFile.length()
             )
         } catch (e: Exception) {
-            // Even if MediaStore fails on a headless sandbox, keep local file accessible via FileProvider
             val localUri = try {
                 FileProvider.getUriForFile(
                     context,
@@ -134,7 +164,7 @@ class ExportGalleryManager(private val context: Context) {
                 success = true,
                 mediaStoreUri = localUri,
                 displayPath = "Movies/OmkarAutoCut/$fileName",
-                fileSizeBytes = renderedFile.length(),
+                fileSizeBytes = fileSize,
                 errorMessage = e.localizedMessage
             )
         }
