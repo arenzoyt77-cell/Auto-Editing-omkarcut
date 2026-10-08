@@ -85,13 +85,16 @@ class SubjectTrackingEngine {
     ): SubjectRegion {
         val duration = (endMs - startMs).coerceAtLeast(200L)
         val tStartUs = (startMs + (duration * 0.15).toLong()) * 1000L
+        val tMidUs = (startMs + (duration * 0.50).toLong()) * 1000L
         val tEndUs = (startMs + (duration * 0.85).toLong()) * 1000L
 
         val frameStart = extractDownscaledFrame(retriever, tStartUs)
+        val frameMid = extractDownscaledFrame(retriever, tMidUs)
         val frameEnd = extractDownscaledFrame(retriever, tEndUs)
 
         if (frameStart == null || frameEnd == null) {
             frameStart?.recycle()
+            frameMid?.recycle()
             frameEnd?.recycle()
             return SubjectRegion(
                 startCenterX = prevEndX,
@@ -116,12 +119,22 @@ class SubjectTrackingEngine {
 
             val startAnalysis = computeSaliencyAndMotionCentroid(pixelsStart, pixelsEnd, w, h, isStartFrame = true)
             val endAnalysis = computeSaliencyAndMotionCentroid(pixelsEnd, pixelsStart, w, h, isStartFrame = false)
+            val midAnalysis = if (frameMid != null && frameMid.width == w && frameMid.height == h) {
+                val pixelsMid = IntArray(w * h)
+                frameMid.getPixels(pixelsMid, 0, w, 0, 0, w, h)
+                computeSaliencyAndMotionCentroid(pixelsMid, pixelsStart, w, h, isStartFrame = false)
+            } else {
+                null
+            }
 
-            // Apply temporal smoothing with previous segment to keep camera tracking stable and shake-free
-            val rawStartX = startAnalysis.centerX * 0.72f + prevEndX * 0.28f
-            val rawStartY = startAnalysis.centerY * 0.72f + prevEndY * 0.28f
-            val rawEndX = endAnalysis.centerX * 0.75f + rawStartX * 0.25f
-            val rawEndY = endAnalysis.centerY * 0.75f + rawStartY * 0.25f
+            val midAnchorX = midAnalysis?.centerX ?: ((startAnalysis.centerX + endAnalysis.centerX) * 0.5f)
+            val midAnchorY = midAnalysis?.centerY ?: ((startAnalysis.centerY + endAnalysis.centerY) * 0.5f)
+
+            // Apply temporal smoothing across start, midpoint, end, and previous segment to keep tracking shake-free
+            val rawStartX = startAnalysis.centerX * 0.52f + midAnchorX * 0.24f + prevEndX * 0.24f
+            val rawStartY = startAnalysis.centerY * 0.52f + midAnchorY * 0.24f + prevEndY * 0.24f
+            val rawEndX = endAnalysis.centerX * 0.54f + midAnchorX * 0.26f + rawStartX * 0.20f
+            val rawEndY = endAnalysis.centerY * 0.54f + midAnchorY * 0.26f + rawStartY * 0.20f
 
             val startX = rawStartX.coerceIn(0.24f, 0.76f)
             val startY = rawStartY.coerceIn(0.24f, 0.74f)
@@ -152,6 +165,7 @@ class SubjectTrackingEngine {
             )
         } finally {
             frameStart.recycle()
+            frameMid?.recycle()
             frameEnd.recycle()
         }
     }

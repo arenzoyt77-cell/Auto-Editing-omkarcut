@@ -124,47 +124,88 @@ fun VideoPreviewPlayer(
         }
     }
 
-    // High-frequency 30fps ticker for live Keyframe interpolation & automatic cut skipping
+    // High-frequency 60fps smooth clock for live Keyframe zoom/pan interpolation & automatic cut skipping
     LaunchedEffect(isPlaying, isPlayerPrepared, previewAutoEditEnabled) {
+        var lastAnchorMediaPosMs = -1L
+        var lastAnchorWallMs = android.os.SystemClock.elapsedRealtime()
+        var monotonicSmoothPosMs = -1L
+
         while (isPlayerPrepared) {
             val mp = mediaPlayer
             if (mp != null) {
                 try {
-                    val posMs = mp.currentPosition.toLong()
+                    val rawMediaPosMs = mp.currentPosition.toLong()
+                    val nowWallMs = android.os.SystemClock.elapsedRealtime()
+
+                    // Smooth out coarse MediaPlayer position polling steps using elapsed wall-clock delta
+                    // while preventing backward micro-steps during continuous playback
+                    val smoothPosMs = if (mp.isPlaying) {
+                        val predictedFromAnchor = if (lastAnchorMediaPosMs >= 0L) {
+                            lastAnchorMediaPosMs + (nowWallMs - lastAnchorWallMs)
+                        } else {
+                            rawMediaPosMs
+                        }
+                        if (lastAnchorMediaPosMs < 0L || kotlin.math.abs(rawMediaPosMs - predictedFromAnchor) > 140L) {
+                            lastAnchorMediaPosMs = rawMediaPosMs
+                            lastAnchorWallMs = nowWallMs
+                            monotonicSmoothPosMs = rawMediaPosMs
+                            rawMediaPosMs
+                        } else {
+                            if (rawMediaPosMs > lastAnchorMediaPosMs) {
+                                lastAnchorMediaPosMs = rawMediaPosMs
+                                lastAnchorWallMs = nowWallMs
+                            }
+                            val interpolated = (lastAnchorMediaPosMs + (nowWallMs - lastAnchorWallMs))
+                                .coerceAtMost(rawMediaPosMs + 65L)
+                            monotonicSmoothPosMs = kotlin.math.max(monotonicSmoothPosMs, interpolated)
+                            monotonicSmoothPosMs
+                        }
+                    } else {
+                        lastAnchorMediaPosMs = rawMediaPosMs
+                        lastAnchorWallMs = nowWallMs
+                        monotonicSmoothPosMs = rawMediaPosMs
+                        rawMediaPosMs
+                    }
+
                     val segs = currentSegments
                     if (currentAutoEdit && segs.isNotEmpty() && mp.isPlaying) {
-                        val inAnySegment = segs.any { posMs in it.startMs..it.endMs }
+                        val inAnySegment = segs.any { smoothPosMs in it.startMs..it.endMs }
                         if (!inAnySegment) {
-                            val nextSeg = segs.firstOrNull { it.startMs > posMs }
+                            val nextSeg = segs.firstOrNull { it.startMs > smoothPosMs }
                             if (nextSeg != null) {
                                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                                     mp.seekTo(nextSeg.startMs, MediaPlayer.SEEK_CLOSEST)
                                 } else {
                                     mp.seekTo(nextSeg.startMs.toInt())
                                 }
+                                lastAnchorMediaPosMs = nextSeg.startMs
+                                lastAnchorWallMs = nowWallMs
+                                monotonicSmoothPosMs = nextSeg.startMs
                                 currentOnPositionChanged(nextSeg.startMs)
                                 liveTransform = currentEvaluate(nextSeg.startMs)
                             } else {
-                                // Reached end of final active segment -> loop to first segment
                                 val firstSeg = segs.first()
                                 mp.seekTo(firstSeg.startMs.toInt())
+                                lastAnchorMediaPosMs = firstSeg.startMs
+                                lastAnchorWallMs = nowWallMs
+                                monotonicSmoothPosMs = firstSeg.startMs
                                 currentOnPositionChanged(firstSeg.startMs)
                                 liveTransform = currentEvaluate(firstSeg.startMs)
                             }
                         } else {
-                            currentOnPositionChanged(posMs)
-                            liveTransform = currentEvaluate(posMs)
+                            currentOnPositionChanged(smoothPosMs)
+                            liveTransform = currentEvaluate(smoothPosMs)
                         }
                     } else {
                         if (mp.isPlaying) {
-                            currentOnPositionChanged(posMs)
+                            currentOnPositionChanged(smoothPosMs)
                         }
-                        liveTransform = currentEvaluate(posMs)
+                        liveTransform = currentEvaluate(smoothPosMs)
                     }
                 } catch (_: Exception) {
                 }
             }
-            delay(33L)
+            delay(16L)
         }
     }
 
@@ -388,7 +429,11 @@ fun VideoPreviewPlayer(
                         }
 
                         // Smart Zoom & Keyframe interpolation pill
-                        val kfLabel = if (liveTransform.segmentProgress < 0.5f) "KF-A → KF-B" else "KF-B PEAK"
+                        val kfLabel = when {
+                            liveTransform.segmentProgress < 0.34f -> "ZOOM IN"
+                            liveTransform.segmentProgress < 0.70f -> "ZOOM HOLD"
+                            else -> "ZOOM OUT"
+                        }
                         Box(
                             modifier = Modifier
                                 .background(

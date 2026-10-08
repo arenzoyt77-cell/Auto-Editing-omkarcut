@@ -538,9 +538,9 @@ class VideoRenderingEngine(
                         fallbackCachedBitmap
                     }
 
-                    val transform = keyframeEngine.evaluateTransformAt(
+                    val transform = keyframeEngine.evaluateTransformAtUs(
                         segments = listOf(segment),
-                        positionMs = targetSourceMs,
+                        positionUs = targetSourceUs,
                         easingType = config.easingType
                     )
 

@@ -153,6 +153,10 @@ data class VideoSegment(
     val keyframeA: CameraKeyframe,
     val keyframeB: CameraKeyframe,
     val smartZoomPeak: Float,
+    val zoomStartTimeMs: Long = startMs,
+    val zoomPeakTimeMs: Long = startMs + ((endMs - startMs) * 0.34f).toLong(),
+    val zoomHoldEndTimeMs: Long = startMs + ((endMs - startMs) * 0.70f).toLong(),
+    val zoomEndTimeMs: Long = endMs,
     val isModifiedManually: Boolean = false,
     val autoDefaultDirection: CameraDirection = cameraDirection,
     val autoDefaultZoomPeak: Float = smartZoomPeak,
@@ -178,7 +182,7 @@ data class AutoCutConfig(
     val minSegmentDurationMs: Long = 650L, // Default 0.65s (within 0.5–0.8s prompt spec)
     val minZoom: Float = 1.00f,
     val targetZoomMin: Float = 1.08f,
-    val targetZoomMax: Float = 1.18f,
+    val targetZoomMax: Float = 1.15f,
     val speechSensitivity: Float = 0.65f,
     val easingType: EasingType = EasingType.CUBIC_HERMITE,
     val preserveOriginalAspectRatio: Boolean = true,
@@ -273,6 +277,10 @@ object SegmentJsonSerializer {
             obj.put("peakDb", seg.peakDb.toDouble())
             obj.put("cameraDirection", seg.cameraDirection.name)
             obj.put("smartZoomPeak", seg.smartZoomPeak.toDouble())
+            obj.put("zoomStartTimeMs", seg.zoomStartTimeMs)
+            obj.put("zoomPeakTimeMs", seg.zoomPeakTimeMs)
+            obj.put("zoomHoldEndTimeMs", seg.zoomHoldEndTimeMs)
+            obj.put("zoomEndTimeMs", seg.zoomEndTimeMs)
             obj.put("isModifiedManually", seg.isModifiedManually)
 
             // SubjectRegion
@@ -354,6 +362,8 @@ object SegmentJsonSerializer {
                 val startMs = obj.getLong("startMs")
                 val endMs = obj.getLong("endMs")
                 val zoomPeak = obj.getDouble("smartZoomPeak").toFloat()
+                val defaultPeakTimeMs = startMs + ((endMs - startMs) * 0.34f).toLong()
+                val defaultHoldEndTimeMs = startMs + ((endMs - startMs) * 0.70f).toLong()
                 list.add(
                     VideoSegment(
                         id = obj.getInt("id"),
@@ -368,6 +378,10 @@ object SegmentJsonSerializer {
                         keyframeA = kfA,
                         keyframeB = kfB,
                         smartZoomPeak = zoomPeak,
+                        zoomStartTimeMs = obj.optLong("zoomStartTimeMs", startMs),
+                        zoomPeakTimeMs = obj.optLong("zoomPeakTimeMs", defaultPeakTimeMs),
+                        zoomHoldEndTimeMs = obj.optLong("zoomHoldEndTimeMs", defaultHoldEndTimeMs),
+                        zoomEndTimeMs = obj.optLong("zoomEndTimeMs", endMs),
                         isModifiedManually = obj.optBoolean("isModifiedManually", false),
                         autoDefaultDirection = if (i % 2 == 0) CameraDirection.RIGHT else CameraDirection.LEFT,
                         autoDefaultZoomPeak = zoomPeak,

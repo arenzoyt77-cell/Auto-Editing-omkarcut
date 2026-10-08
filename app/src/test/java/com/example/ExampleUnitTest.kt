@@ -7,6 +7,7 @@ import com.example.engine.SpeechTranscriptionEngine
 import com.example.engine.VideoRenderingEngine
 import com.example.model.AutoCutConfig
 import com.example.model.CameraDirection
+import com.example.model.EasingType
 import com.example.model.SubjectRegion
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -84,7 +85,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun alternatingCameraDirection_andSmartZoom_areGeneratedCorrectly() {
+    fun alternatingCameraDirection_andDynamicSmoothZoomCurve_behaveLikeEditorMadeCameraZoom() {
         val engine = KeyframeEditingEngine()
         val rawSegments = listOf(
             RawSpeechSegment(0L, 3500L, "MALE: \"Aare ruko, tum kaha ja rahe ho? Pehle meri baat suno.\"", 0.92f, -6f, SpeakerIdentity.MALE),
@@ -92,15 +93,16 @@ class ExampleUnitTest {
             RawSpeechSegment(5550L, 9000L, "MALE: \"Ruko. Tum idhar aao. Mujhe tumse ek important baat karni hai.\"", 0.94f, -5f, SpeakerIdentity.MALE),
             RawSpeechSegment(9000L, 11000L, "FEMALE: \"Theek hai, main sun rahi hoon, jaldi bolo!\"", 0.91f, -6f, SpeakerIdentity.FEMALE)
         )
+        // Simulate moving subject from left-of-center (0.40) to right-of-center (0.58)
         val subjects = rawSegments.map {
             SubjectRegion(
-                startCenterX = 0.50f,
-                startCenterY = 0.48f,
-                endCenterX = 0.52f,
+                startCenterX = 0.40f,
+                startCenterY = 0.46f,
+                endCenterX = 0.58f,
                 endCenterY = 0.48f,
                 widthRatio = 0.34f,
                 heightRatio = 0.42f,
-                motionMagnitude = 0.20f,
+                motionMagnitude = 0.22f,
                 confidence = 0.90f
             )
         }
@@ -118,10 +120,65 @@ class ExampleUnitTest {
         assertEquals(CameraDirection.LEFT, timeline[3].cameraDirection)
 
         timeline.forEach { seg ->
-            assertTrue("Smart zoom should be >= 1.08x", seg.smartZoomPeak >= 1.08f)
-            assertTrue("Smart zoom should be <= 1.18x", seg.smartZoomPeak <= 1.18f)
-            assertEquals(0.0f, seg.keyframeA.normalizedTime, 0.001f)
-            assertEquals(1.0f, seg.keyframeB.normalizedTime, 0.001f)
+            // Subtle, cinematic peak zoom in [1.08 .. 1.15]
+            assertTrue("Smart zoom (${seg.smartZoomPeak}) should be >= 1.08x", seg.smartZoomPeak >= 1.08f)
+            assertTrue("Smart zoom (${seg.smartZoomPeak}) should be <= 1.15x", seg.smartZoomPeak <= 1.15f)
+
+            // Automatically calculated zoom start, peak, hold-end, and end times
+            assertEquals(seg.startMs, seg.zoomStartTimeMs)
+            assertTrue(seg.zoomPeakTimeMs > seg.zoomStartTimeMs)
+            assertTrue(seg.zoomHoldEndTimeMs > seg.zoomPeakTimeMs)
+            assertEquals(seg.endMs, seg.zoomEndTimeMs)
+
+            // 1. Start of segment: Scale = 1.00
+            val startTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomStartTimeMs * 1000L, EasingType.CUBIC_HERMITE)
+            assertEquals("Start of segment must start at 1.00x", 1.00f, startTransform.zoom, 0.002f)
+
+            // 2. Early/middle peak time: Smoothly increased toward 1.08–1.15
+            val peakInTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomPeakTimeMs * 1000L, EasingType.CUBIC_HERMITE)
+            assertTrue("At zoomPeakTimeMs, zoom (${peakInTransform.zoom}) must reach zoomed framing", peakInTransform.zoom >= 1.075f)
+
+            // 3. Middle hold phase: Holds / very slowly continues
+            val holdEndTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomHoldEndTimeMs * 1000L, EasingType.CUBIC_HERMITE)
+            assertEquals(seg.smartZoomPeak, holdEndTransform.zoom, 0.002f)
+            assertTrue("Middle hold should hold or slowly continue from peak-in", holdEndTransform.zoom >= peakInTransform.zoom)
+
+            // 4. End of segment: Smoothly returns to 1.00
+            val endTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomEndTimeMs * 1000L, EasingType.CUBIC_HERMITE)
+            assertEquals("End of segment must smoothly return to 1.00x", 1.00f, endTransform.zoom, 0.002f)
+
+            // 5. Verify 30fps frame-by-frame smoothness: no sudden scale jumps or abrupt crop changes,
+            //    and subject remains properly centered/framed inside the zoomed viewport at all times.
+            val frameStepUs = 33_333L
+            var prevTransform = startTransform
+            var tUs = seg.startMs * 1000L + frameStepUs
+            while (tUs <= seg.endMs * 1000L) {
+                val curr = engine.evaluateTransformAtUs(listOf(seg), tUs, EasingType.CUBIC_HERMITE)
+                val deltaZoom = abs(curr.zoom - prevTransform.zoom)
+                val deltaFocusX = abs(curr.focusX - prevTransform.focusX)
+                val deltaFocusY = abs(curr.focusY - prevTransform.focusY)
+
+                assertTrue("No sudden scale jump between consecutive 30fps frames (delta=$deltaZoom)", deltaZoom < 0.012f)
+                assertTrue("No sudden horizontal crop jump between consecutive 30fps frames (delta=$deltaFocusX)", deltaFocusX < 0.012f)
+                assertTrue("No sudden vertical crop jump between consecutive 30fps frames (delta=$deltaFocusY)", deltaFocusY < 0.012f)
+
+                // Verify subject center stays well inside the visible zoomed crop window [focusX - halfView, focusX + halfView]
+                val halfView = 0.5f / curr.zoom
+                assertTrue("Subject X must remain framed inside zoomed crop", curr.subjectCenterX in (curr.focusX - halfView)..(curr.focusX + halfView))
+                assertTrue("Subject Y must remain framed inside zoomed crop", curr.subjectCenterY in (curr.focusY - halfView)..(curr.focusY + halfView))
+
+                prevTransform = curr
+                tUs += frameStepUs
+            }
+
+            // 6. Verify that as subject moves from startCenterX (0.40) to endCenterX (0.58) during zoomed hold,
+            //    the camera crop/focus position smoothly follows the moving subject
+            val earlyHoldUs = (seg.zoomPeakTimeMs * 1000L)
+            val lateHoldUs = (seg.zoomHoldEndTimeMs * 1000L)
+            val earlyHold = engine.evaluateTransformAtUs(listOf(seg), earlyHoldUs, EasingType.CUBIC_HERMITE)
+            val lateHold = engine.evaluateTransformAtUs(listOf(seg), lateHoldUs, EasingType.CUBIC_HERMITE)
+            assertTrue("Tracked subject X should move right over time", lateHold.subjectCenterX > earlyHold.subjectCenterX)
+            assertTrue("Camera focusX should smoothly follow the rightward-moving subject", lateHold.focusX > earlyHold.focusX)
         }
     }
 
