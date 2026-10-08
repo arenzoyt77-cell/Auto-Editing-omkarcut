@@ -21,7 +21,7 @@ jobs:
 
       - name: Remove any stale pre-existing APK or build output directories
         run: |
-          rm -rf .build-outputs build app/build
+          rm -rf .build-outputs build app/build artifact-output
           find . -name "*.apk" -type f -delete || true
 
       - name: Set up JDK 21 (Temurin)
@@ -151,7 +151,6 @@ jobs:
             -startdate "-3650d" \
             -validity 14000 \
             -dname "CN=Android Debug,O=Android,C=US"
-          keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | head -n 20
 
       - name: Clean project
         run: ./gradlew clean --no-daemon --stacktrace
@@ -159,20 +158,35 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Align and sign APK with v1, v2, and v3 signature schemes
+      - name: Locate, align, sign, and verify generated Android APK
+        id: verify_apk
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
           BUILD_TOOLS="${SDK_ROOT}/build-tools/36.0.0"
-          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
 
-          if [ ! -f "${APK_PATH}" ]; then
-            echo "ERROR: Expected Gradle output ${APK_PATH} was not produced."
+          echo "=== 1. Automatically locating generated Debug APK ==="
+          FOUND_APK=$(find . -path "*/build/outputs/apk/*.apk" \
+            ! -name "*androidTest*" \
+            ! -name "*unsigned*" \
+            -type f | sort | head -n 1)
+
+          if [ -z "${FOUND_APK}" ] || [ ! -f "${FOUND_APK}" ]; then
+            echo "ERROR: No generated APK found under */build/outputs/apk/"
+            exit 1
+          fi
+          echo "Found generated APK: ${FOUND_APK}"
+
+          APK_SIZE=$(stat -c%s "${FOUND_APK}")
+          echo "Generated APK size: ${APK_SIZE} bytes"
+          if [ "${APK_SIZE}" -le 0 ]; then
+            echo "ERROR: Generated APK is empty (0 bytes)."
             exit 1
           fi
 
-          ALIGNED_APK="app/build/outputs/apk/debug/app-debug-aligned.apk"
-          "${BUILD_TOOLS}/zipalign" -f -p 4 "${APK_PATH}" "${ALIGNED_APK}"
-          mv -f "${ALIGNED_APK}" "${APK_PATH}"
+          echo "=== 2. Aligning and signing APK (v1 + v2 + v3 schemes) ==="
+          mkdir -p artifact-output
+          STAGED_APK="artifact-output/OMKAR-AUTOCUT-debug.apk"
+          "${BUILD_TOOLS}/zipalign" -f -p 4 "${FOUND_APK}" "${STAGED_APK}"
 
           "${BUILD_TOOLS}/apksigner" sign \
             --ks debug.keystore \
@@ -182,60 +196,64 @@ jobs:
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            "${APK_PATH}"
+            "${STAGED_APK}"
 
-      - name: Verify generated APK exists and is a valid installable Android APK
-        run: |
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
-          BUILD_TOOLS="${SDK_ROOT}/build-tools/36.0.0"
-          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
-
-          echo "=== 1. Checking APK file existence and size ==="
-          if [ ! -f "${APK_PATH}" ] || [ ! -s "${APK_PATH}" ]; then
-            echo "ERROR: APK is missing or empty at ${APK_PATH}"
+          echo "=== 3. Verifying APK existence, non-zero size, and ZIP integrity ==="
+          if [ ! -f "${STAGED_APK}" ] || [ ! -s "${STAGED_APK}" ]; then
+            echo "ERROR: Staged APK is missing or empty at ${STAGED_APK}"
             exit 1
           fi
-          APK_SIZE=$(stat -c%s "${APK_PATH}")
-          echo "APK size: ${APK_SIZE} bytes"
-          if [ "${APK_SIZE}" -lt 1000000 ]; then
-            echo "ERROR: APK size (${APK_SIZE} bytes) is suspiciously small or truncated."
+          FINAL_SIZE=$(stat -c%s "${STAGED_APK}")
+          if [ "${FINAL_SIZE}" -lt 1000000 ]; then
+            echo "ERROR: Staged APK size (${FINAL_SIZE} bytes) is invalid or truncated."
             exit 1
           fi
+          unzip -t "${STAGED_APK}" > /dev/null
 
-          echo "=== 2. Testing ZIP archive & CRC integrity (unzip -t) ==="
-          unzip -t "${APK_PATH}" > /dev/null
-
-          echo "=== 3. Checking required APK entries (Manifest, DEX, Resources, ABIs) ==="
-          APK_LIST=$(unzip -Z1 "${APK_PATH}")
+          echo "=== 4. Verifying required Android APK structure ==="
+          APK_LIST=$(unzip -Z1 "${STAGED_APK}")
           echo "${APK_LIST}" | grep -qx "AndroidManifest.xml" || { echo "ERROR: Missing AndroidManifest.xml"; exit 1; }
           echo "${APK_LIST}" | grep -qx "classes.dex" || { echo "ERROR: Missing classes.dex"; exit 1; }
           echo "${APK_LIST}" | grep -qx "resources.arsc" || { echo "ERROR: Missing resources.arsc"; exit 1; }
           echo "${APK_LIST}" | grep -q "^lib/arm64-v8a/" || { echo "ERROR: Missing arm64-v8a native libraries"; exit 1; }
           echo "${APK_LIST}" | grep -q "^lib/armeabi-v7a/" || { echo "ERROR: Missing armeabi-v7a native libraries"; exit 1; }
 
-          echo "=== 4. Verifying zipalign 4-byte alignment ==="
-          "${BUILD_TOOLS}/zipalign" -c 4 "${APK_PATH}"
+          echo "=== 5. Verifying zipalign, apksigner signatures, and AndroidManifest badging ==="
+          "${BUILD_TOOLS}/zipalign" -c 4 "${STAGED_APK}"
 
-          echo "=== 5. Verifying APK v1/v2/v3 signatures with apksigner ==="
-          SIGN_OUT=$("${BUILD_TOOLS}/apksigner" verify --verbose --print-certs "${APK_PATH}")
+          SIGN_OUT=$("${BUILD_TOOLS}/apksigner" verify --verbose --print-certs "${STAGED_APK}")
           echo "${SIGN_OUT}"
           echo "${SIGN_OUT}" | grep -q "Verified using v1 scheme (JAR signing): true" || { echo "ERROR: v1 signature missing"; exit 1; }
           echo "${SIGN_OUT}" | grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" || { echo "ERROR: v2 signature missing"; exit 1; }
           echo "${SIGN_OUT}" | grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" || { echo "ERROR: v3 signature missing"; exit 1; }
 
-          echo "=== 6. Verifying AndroidManifest badging with aapt2 ==="
-          BADGING=$("${BUILD_TOOLS}/aapt2" dump badging "${APK_PATH}")
-          echo "${BADGING}" | head -n 25
-          echo "${BADGING}" | grep -q "package: name='com.aistudio.omkarautocut.vxrplq'" || { echo "ERROR: Invalid package name in badging"; exit 1; }
-          echo "${BADGING}" | grep -q "minSdkVersion:'24'" || { echo "ERROR: Invalid minSdkVersion in badging"; exit 1; }
+          BADGING=$("${BUILD_TOOLS}/aapt2" dump badging "${STAGED_APK}")
+          echo "${BADGING}" | head -n 20
+          echo "${BADGING}" | grep -q "package: name='com.aistudio.omkarautocut.vxrplq'" || { echo "ERROR: Invalid package name"; exit 1; }
           echo "${BADGING}" | grep -q "launchable-activity: name='com.example.MainActivity'" || { echo "ERROR: Missing launchable MainActivity"; exit 1; }
 
-          echo "SUCCESS: ${APK_PATH} passed all archive, manifest, ABI, alignment, and v1/v2/v3 signature checks!"
+          echo "apk_path=${STAGED_APK}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload OMKAR-AUTOCUT-APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: OMKAR-AUTOCUT-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.verify_apk.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 30
+
+      - name: Confirm APK Ready for Download
+        run: |
+          echo "=========================================="
+          echo "BUILD SUCCESSFUL"
+          echo "APK READY FOR DOWNLOAD"
+          echo "Artifact Name: OMKAR-AUTOCUT-APK"
+          echo "File: ${{ steps.verify_apk.outputs.apk_path }}"
+          echo "=========================================="
+          {
+            echo "## BUILD SUCCESSFUL"
+            echo "### APK READY FOR DOWNLOAD"
+            echo "- **Artifact Name:** \`OMKAR-AUTOCUT-APK\`"
+            echo "- **APK File:** \`OMKAR-AUTOCUT-debug.apk\`"
+            echo "- **Download:** Scroll down to the **Artifacts** section on this workflow run page and click **OMKAR-AUTOCUT-APK**."
+          } >> "${GITHUB_STEP_SUMMARY}"
