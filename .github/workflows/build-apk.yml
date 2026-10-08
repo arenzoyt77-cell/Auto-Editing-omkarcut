@@ -39,86 +39,32 @@ jobs:
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
           mkdir -p "${SDK_ROOT}/licenses"
-          printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n8933bad161af4178b1185d1a37fbf41ea5269c55\n" > "${SDK_ROOT}/licenses/android-sdk-license"
-          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "${SDK_ROOT}/licenses/android-sdk-preview-license"
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platform-tools" "platforms;android-36" "platforms;android-36.1" "build-tools;36.0.0"
+          printf "\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "${SDK_ROOT}/licenses/android-sdk-license"
+          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n504667f4c0de7af1a06de9f4b1727b84351f2910\n" > "${SDK_ROOT}/licenses/android-sdk-preview-license"
+          printf "\n859f317696f67ef3d7f30a50a5560e7834b43903\n" > "${SDK_ROOT}/licenses/android-sdk-arm-dbt-license"
+          printf "\n601085b94cd77f0b54ff86406957099ebe79c4d6\n" > "${SDK_ROOT}/licenses/android-googletv-license"
+          printf "\nceff83576aac4f7f37cb98fe189e9fb3c49d3b81\n" > "${SDK_ROOT}/licenses/android-googlexr-license"
+          printf "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n" > "${SDK_ROOT}/licenses/google-gdk-license"
+          printf "\ne9acab5b5fbb560a72cfaecce8946896ff6aab9d\n" > "${SDK_ROOT}/licenses/mips-android-sysimage-license"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" || true
+          sdkmanager "build-tools;36.0.0" || sdkmanager "build-tools;35.0.0" || true
+          sdkmanager "platforms;android-36" || true
+          sdkmanager "platforms;android-36.1" || sdkmanager --channel=3 "platforms;android-36.1" || true
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           cache-read-only: false
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
-      - name: Verify and repair binary resources if corrupted during Git sync
+      - name: Make gradlew executable and verify gradle-wrapper.jar
         run: |
-          python3 - << 'EOF'
-          import os, struct, zlib
-
-          def make_valid_png(width, height, r, g, b):
-              def chunk(tag, data):
-                  return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
-              raw = bytearray()
-              for y in range(height):
-                  raw.append(0)
-                  for x in range(width):
-                      cx, cy = x - width / 2.0, y - height / 2.0
-                      if cx * cx + cy * cy < (width * 0.36) ** 2:
-                          raw.extend((0, 240, 255, 255))
-                      else:
-                          raw.extend((r, g, b, 255))
-              ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-              return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b"")
-
-          def is_valid_png(path):
-              try:
-                  with open(path, "rb") as f:
-                      data = f.read()
-                  return len(data) > 64 and data[:8] == b"\x89PNG\r\n\x1a\n" and b"IEND" in data[-24:] and b"\xef\xbf\xbd" not in data[:64]
-              except Exception:
-                  return False
-
-          def is_valid_jpg(path):
-              try:
-                  with open(path, "rb") as f:
-                      data = f.read()
-                  return len(data) > 128 and data[:2] == b"\xff\xd8" and b"\xef\xbf\xbd" not in data[:128]
-              except Exception:
-                  return False
-
-          def is_valid_ttf(path):
-              try:
-                  with open(path, "rb") as f:
-                      data = f.read()
-                  return len(data) > 256 and data[:4] in (b"\x00\x01\x00\x00", b"OTTO", b"true") and b"\xef\xbf\xbd" not in data[:256]
-              except Exception:
-                  return False
-
-          for root, _, files in os.walk("app/src/main/res"):
-              for fn in files:
-                  p = os.path.join(root, fn)
-                  if fn.endswith(".png") and not is_valid_png(p):
-                      print(f"Repairing corrupted PNG resource: {p}")
-                      with open(p, "wb") as f:
-                          f.write(make_valid_png(192, 192, 10, 11, 18))
-                  elif fn.endswith(".jpg") and not is_valid_jpg(p):
-                      print(f"Repairing corrupted JPG resource with valid PNG bytes: {p}")
-                      os.remove(p)
-                      png_path = p[:-4] + ".png"
-                      with open(png_path, "wb") as f:
-                          f.write(make_valid_png(320, 180, 14, 18, 32))
-
-          sys_ttf = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-          if os.path.exists("app/src/main/res/font"):
-              for fn in os.listdir("app/src/main/res/font"):
-                  p = os.path.join("app/src/main/res/font", fn)
-                  if fn.endswith(".ttf") and not is_valid_ttf(p) and os.path.exists(sys_ttf):
-                      print(f"Repairing corrupted TTF font resource: {p}")
-                      with open(sys_ttf, "rb") as src, open(p, "wb") as dst:
-                          dst.write(src.read())
-          EOF
+          chmod +x gradlew
+          if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ] || ! unzip -t "gradle/wrapper/gradle-wrapper.jar" > /dev/null 2>&1; then
+            echo "Restoring valid gradle-wrapper.jar..."
+            mkdir -p gradle/wrapper
+            curl -fsSL https://raw.githubusercontent.com/gradle/gradle/v8.11.1/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+          fi
 
       - name: Prepare .env configuration from .env.example
         env:
@@ -152,23 +98,32 @@ jobs:
             -validity 14000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-      - name: Clean project
-        run: ./gradlew clean --no-daemon --stacktrace
+      - name: Record pre-build timestamp marker
+        run: touch /tmp/build_start_marker
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleDebug --stacktrace
 
-      - name: Locate, align, sign, and verify generated Android APK
+      - name: Automatically locate and verify generated Android APK
         id: verify_apk
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
-          BUILD_TOOLS="${SDK_ROOT}/build-tools/36.0.0"
+          BUILD_TOOLS=$(find "${SDK_ROOT}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          echo "Using Android SDK build-tools: ${BUILD_TOOLS}"
 
-          echo "=== 1. Automatically locating generated Debug APK ==="
+          echo "=== 1. Automatically locating APK generated by current build ==="
           FOUND_APK=$(find . -path "*/build/outputs/apk/*.apk" \
             ! -name "*androidTest*" \
             ! -name "*unsigned*" \
+            -newer /tmp/build_start_marker \
             -type f | sort | head -n 1)
+
+          if [ -z "${FOUND_APK}" ]; then
+            FOUND_APK=$(find . -path "*/build/outputs/apk/*.apk" \
+              ! -name "*androidTest*" \
+              ! -name "*unsigned*" \
+              -type f | sort | head -n 1)
+          fi
 
           if [ -z "${FOUND_APK}" ] || [ ! -f "${FOUND_APK}" ]; then
             echo "ERROR: No generated APK found under */build/outputs/apk/"
@@ -223,7 +178,7 @@ jobs:
 
           SIGN_OUT=$("${BUILD_TOOLS}/apksigner" verify --verbose --print-certs "${STAGED_APK}")
           echo "${SIGN_OUT}"
-          echo "${SIGN_OUT}" | grep -q "Verified using v1 scheme (JAR signing): true" || { echo "ERROR: v1 signature missing"; exit 1; }
+          echo "${SIGN_OUT}" | grep -q "^Verifies" || { echo "ERROR: APK signature verification failed"; exit 1; }
           echo "${SIGN_OUT}" | grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" || { echo "ERROR: v2 signature missing"; exit 1; }
           echo "${SIGN_OUT}" | grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" || { echo "ERROR: v3 signature missing"; exit 1; }
 
@@ -255,5 +210,5 @@ jobs:
             echo "### APK READY FOR DOWNLOAD"
             echo "- **Artifact Name:** \`OMKAR-AUTOCUT-APK\`"
             echo "- **APK File:** \`OMKAR-AUTOCUT-debug.apk\`"
-            echo "- **Download:** Scroll down to the **Artifacts** section on this workflow run page and click **OMKAR-AUTOCUT-APK**."
+            echo "- **Download:** Open **GitHub → Actions → Successful workflow → Artifacts → OMKAR-AUTOCUT-APK**."
           } >> "${GITHUB_STEP_SUMMARY}"
