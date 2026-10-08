@@ -1,0 +1,109 @@
+name: Build OMKAR AUTOCUT Android APK
+
+on:
+  push:
+    branches: [ "main", "master", "**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build Debug APK (Ubuntu Latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses and install required SDK packages
+        run: |
+          yes | sdkmanager --licenses || true
+          mkdir -p "${ANDROID_HOME}/licenses"
+          printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n8933bad161af4178b1185d1a37fbf41ea5269c55\n" > "${ANDROID_HOME}/licenses/android-sdk-license"
+          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "${ANDROID_HOME}/licenses/android-sdk-preview-license"
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+          sdkmanager "platforms;android-36.1" || true
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Prepare .env configuration from .env.example
+        env:
+          GEMINI_API_KEY_SECRET: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ ! -f ".env" ]; then
+            if [ -f ".env.example" ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+          if [ -n "${GEMINI_API_KEY_SECRET}" ]; then
+            echo "" >> .env
+            echo "GEMINI_API_KEY=${GEMINI_API_KEY_SECRET}" >> .env
+          fi
+
+      - name: Prepare debug.keystore for debug signing config
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            if [ -f "debug.keystore.base64" ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+            else
+              keytool -genkeypair -v \
+                -keystore debug.keystore \
+                -storepass android \
+                -alias androiddebugkey \
+                -keypass android \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+
+      - name: Clean project
+        run: ./gradlew clean --no-daemon
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Locate generated APK and copy to release/OMKAR-AUTOCUT.apk
+        run: |
+          mkdir -p release
+          APK_PATH=$(find app/build/outputs/apk -type f -name "*.apk" | head -n 1)
+          if [ -z "${APK_PATH}" ]; then
+            APK_PATH=$(find . -path "*/build/outputs/apk/*.apk" -type f | head -n 1)
+          fi
+          if [ -z "${APK_PATH}" ] || [ ! -s "${APK_PATH}" ]; then
+            echo "ERROR: No valid APK file was found under build/outputs/apk/."
+            exit 1
+          fi
+          echo "Found generated APK at: ${APK_PATH}"
+          cp -f "${APK_PATH}" release/OMKAR-AUTOCUT.apk
+          ls -lh release/OMKAR-AUTOCUT.apk
+
+      - name: Upload OMKAR-AUTOCUT-APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OMKAR-AUTOCUT-APK
+          path: release/OMKAR-AUTOCUT.apk
+          if-no-files-found: error
+          retention-days: 30
