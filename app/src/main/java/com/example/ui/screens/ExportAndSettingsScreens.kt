@@ -800,6 +800,48 @@ fun StudioSettingsScreen(
                     colors = SwitchDefaults.colors(checkedThumbColor = ElectricCyan)
                 )
             }
+
+            // 7. Export Resolution Mode (1080p Default vs Original 4K Resolution)
+            SettingsCard(
+                title = "EXPORT VIDEO RESOLUTION",
+                subtitle = "1080p (1080×1920) is default for smooth playback. Low-res videos are never upscaled.",
+                badge = if (config.exportOriginal4kResolution) "Original (Up to 4K)" else "1080p Full HD"
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        false to "1080p (Recommended)",
+                        true to "Original Resolution"
+                    ).forEach { (useOriginal4k, label) ->
+                        val selected = config.exportOriginal4kResolution == useOriginal4k
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (selected) ElectricCyan.copy(alpha = 0.2f) else ObsidianBg)
+                                .border(
+                                    1.dp,
+                                    if (selected) ElectricCyan else GlassBorder,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable {
+                                    onUpdateConfig(config.copy(exportOriginal4kResolution = useOriginal4k))
+                                }
+                                .padding(vertical = 10.dp, horizontal = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (selected) ElectricCyan else TextSecondary,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

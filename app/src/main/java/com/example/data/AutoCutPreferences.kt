@@ -24,6 +24,7 @@ class AutoCutPreferences(private val context: Context) {
         private val KEY_PRESERVE_ASPECT = booleanPreferencesKey("preserve_aspect")
         private val KEY_SAFE_ZONE = booleanPreferencesKey("keep_subject_safe_zone")
         private val KEY_BURN_HUD = booleanPreferencesKey("burn_hud_telemetry")
+        private val KEY_EXPORT_ORIGINAL_4K = booleanPreferencesKey("export_original_4k_resolution")
     }
 
     val configFlow: Flow<AutoCutConfig> = context.dataStore.data.map { prefs ->
@@ -42,7 +43,8 @@ class AutoCutPreferences(private val context: Context) {
             easingType = easing,
             preserveOriginalAspectRatio = prefs[KEY_PRESERVE_ASPECT] ?: true,
             keepSubjectInSafeZone = prefs[KEY_SAFE_ZONE] ?: true,
-            burnHudTelemetryOnExport = prefs[KEY_BURN_HUD] ?: false
+            burnHudTelemetryOnExport = prefs[KEY_BURN_HUD] ?: false,
+            exportOriginal4kResolution = prefs[KEY_EXPORT_ORIGINAL_4K] ?: false
         )
     }
 
@@ -56,6 +58,7 @@ class AutoCutPreferences(private val context: Context) {
             prefs[KEY_PRESERVE_ASPECT] = config.preserveOriginalAspectRatio
             prefs[KEY_SAFE_ZONE] = config.keepSubjectInSafeZone
             prefs[KEY_BURN_HUD] = config.burnHudTelemetryOnExport
+            prefs[KEY_EXPORT_ORIGINAL_4K] = config.exportOriginal4kResolution
         }
     }
 }

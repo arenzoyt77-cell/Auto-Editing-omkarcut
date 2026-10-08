@@ -126,11 +126,45 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun exportResolutionAndBitrate_follow1080pDefault_noLowResUpscaling_andOptimalBitrate() {
+        // Low-res 544x960 must NOT be upscaled
+        val (lowW, lowH) = VideoRenderingEngine.computeSafeEncoderDimensions(544, 960, preferOriginal4k = false)
+        assertEquals(544, lowW)
+        assertEquals(960, lowH)
+
+        // 720p (720x1280) must NOT be upscaled
+        val (hdW, hdH) = VideoRenderingEngine.computeSafeEncoderDimensions(720, 1280, preferOriginal4k = false)
+        assertEquals(720, hdW)
+        assertEquals(1280, hdH)
+
+        // 1080p (1080x1920) is preserved at 1080x1920
+        val (fhdW, fhdH) = VideoRenderingEngine.computeSafeEncoderDimensions(1080, 1920, preferOriginal4k = false)
+        assertEquals(1080, fhdW)
+        assertEquals(1920, fhdH)
+
+        // 4K (2160x3840) defaults to 1080x1920 for performance, or preserves 2160x3840 when preferOriginal4k = true
+        val (downscaled4kW, downscaled4kH) = VideoRenderingEngine.computeSafeEncoderDimensions(2160, 3840, preferOriginal4k = false)
+        assertEquals(1080, downscaled4kW)
+        assertEquals(1920, downscaled4kH)
+
+        val (orig4kW, orig4kH) = VideoRenderingEngine.computeSafeEncoderDimensions(2160, 3840, preferOriginal4k = true)
+        assertEquals(2160, orig4kW)
+        assertEquals(3840, orig4kH)
+
+        // Bitrate checks: 1080p 30 FPS -> 8–12 Mbps; 1080p 60 FPS -> 12–18 Mbps
+        val bitrate1080p30 = VideoRenderingEngine.computeOptimalBitrateBps(1080, 1920, 30)
+        assertTrue("1080p30 bitrate ($bitrate1080p30) should be in 8..12 Mbps", bitrate1080p30 in 8_000_000..12_000_000)
+
+        val bitrate1080p60 = VideoRenderingEngine.computeOptimalBitrateBps(1080, 1920, 60)
+        assertTrue("1080p60 bitrate ($bitrate1080p60) should be in 12..18 Mbps", bitrate1080p60 in 12_000_000..18_000_000)
+    }
+
+    @Test
     fun exportTimestampNormalization_shortAndLongVideos_30And60Fps_matchExactDuration() {
         // Test 1: Short 15-second video at 30 FPS across 4 speaker segments
         val shortSegmentsMs = listOf(3800L, 3200L, 4500L, 3500L) // Total = 15,000ms (15.0s)
         val fps30 = VideoRenderingEngine.determineTargetCfrFps(29.97f)
-        assertEquals(30, fps30)
+        assertEquals("30 FPS source must stay 30 FPS", 30, fps30)
 
         val shortVideoPts = VideoRenderingEngine.buildNormalizedContinuousVideoPtsUs(shortSegmentsMs, fps30)
         assertEquals("First frame must start at 00:00:00 (0L us)", 0L, shortVideoPts.first())
@@ -146,12 +180,11 @@ class ExampleUnitTest {
         // Test 2: 48.6-second video (00:48.6) at 60 FPS across 6 speaker segments with synchronized audio
         val longSegmentsMs = listOf(8100L, 7400L, 9200L, 6800L, 8500L, 8600L) // Total = 48,600ms (00:48.6)
         val fps60 = VideoRenderingEngine.determineTargetCfrFps(59.94f)
-        assertEquals(60, fps60)
+        assertEquals("60 FPS source must stay 60 FPS", 60, fps60)
 
         val longVideoPts = VideoRenderingEngine.buildNormalizedContinuousVideoPtsUs(longSegmentsMs, fps60)
         assertEquals("First frame must start at 0L", 0L, longVideoPts.first())
 
-        // Simulate source audio timestamps per segment and normalize with asetpts=PTS-STARTPTS
         val allContinuousAudioPts = mutableListOf<Long>()
         var srcCursorUs = 0L
         var timelineOffsetUs = 0L
@@ -161,10 +194,10 @@ class ExampleUnitTest {
             val segStartUs = srcCursorUs
             val segEndUs = srcCursorUs + segDurUs
             val rawAudioSamples = mutableListOf<Long>()
-            var aUs = segStartUs + 5000L // Even if first packet starts slightly after segStartUs, resets to 0L!
+            var aUs = segStartUs + 5000L
             while (aUs <= segEndUs) {
                 rawAudioSamples.add(aUs)
-                aUs += 23219L // ~44.1kHz AAC 1024-sample frame duration
+                aUs += 23219L
             }
             val segFrames = ((segDurMs * fps60) / 1000.0).toInt()
             val targetSegDurUs = segFrames * frameDur60Us
@@ -175,7 +208,6 @@ class ExampleUnitTest {
                 segTargetDurationUs = targetSegDurUs,
                 segmentTimelineOffsetUs = timelineOffsetUs
             )
-            // First packet of first segment must be 0L
             if (timelineOffsetUs == 0L) {
                 assertEquals(0L, normalizedSegAudio.first())
             }
@@ -201,7 +233,6 @@ class ExampleUnitTest {
 
     @Test
     fun validator_rejectsCorruptedUptimeTimestampsAndNegativeTimestamps() {
-        // Simulate the old 59:39:08 (214,748 seconds = 214,748,000,000 us) System.nanoTime() bug
         val broken59HourPts = List(300) { i -> 214_748_000_000L + i * 33_333L }
         val (validUptime, _) = VideoRenderingEngine.validateTimestampSequence(
             videoPtsUs = broken59HourPts,
@@ -211,7 +242,6 @@ class ExampleUnitTest {
         )
         assertFalse("Validator must reject unnormalized 59:39:08 uptime timestamps", validUptime)
 
-        // Simulate negative timestamp
         val negativePts = listOf(-33_333L, 0L, 33_333L, 66_666L)
         val (validNeg, _) = VideoRenderingEngine.validateTimestampSequence(
             videoPtsUs = negativePts,
@@ -221,7 +251,6 @@ class ExampleUnitTest {
         )
         assertFalse("Validator must reject negative timestamps", validNeg)
 
-        // Simulate timestamp reset in the middle of concatenated video
         val resetMidStreamPts = listOf(0L, 33_333L, 66_666L, 0L, 33_333L)
         val (validReset, _) = VideoRenderingEngine.validateTimestampSequence(
             videoPtsUs = resetMidStreamPts,

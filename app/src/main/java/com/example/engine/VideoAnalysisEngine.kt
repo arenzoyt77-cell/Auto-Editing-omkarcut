@@ -188,6 +188,26 @@ class VideoAnalysisEngine(private val context: Context) {
                                 format.getFloat(MediaFormat.KEY_FRAME_RATE)
                             }
                         }
+                        // Measure actual presentation timestamps across initial video samples for exact FPS
+                        extractor.selectTrack(i)
+                        var samplesRead = 0
+                        var firstPtsUs = -1L
+                        var lastPtsUs = -1L
+                        while (samplesRead < 90) {
+                            val pts = extractor.sampleTime
+                            if (pts < 0L) break
+                            if (firstPtsUs < 0L || pts < firstPtsUs) firstPtsUs = pts
+                            if (pts > lastPtsUs) lastPtsUs = pts
+                            samplesRead++
+                            if (!extractor.advance()) break
+                        }
+                        extractor.unselectTrack(i)
+                        if (samplesRead >= 12 && lastPtsUs > firstPtsUs) {
+                            val measuredFps = ((samplesRead - 1) * 1_000_000f) / (lastPtsUs - firstPtsUs).toFloat()
+                            if (measuredFps in 12f..120f && (detectedFps <= 0f || kotlin.math.abs(detectedFps - measuredFps) > 6f)) {
+                                detectedFps = measuredFps
+                            }
+                        }
                     } else if (trackMime.startsWith("audio/")) {
                         hasAudioTrack = true
                     }

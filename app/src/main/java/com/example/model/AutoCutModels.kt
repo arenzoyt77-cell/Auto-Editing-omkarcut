@@ -183,7 +183,8 @@ data class AutoCutConfig(
     val easingType: EasingType = EasingType.CUBIC_HERMITE,
     val preserveOriginalAspectRatio: Boolean = true,
     val keepSubjectInSafeZone: Boolean = true,
-    val burnHudTelemetryOnExport: Boolean = false
+    val burnHudTelemetryOnExport: Boolean = false,
+    val exportOriginal4kResolution: Boolean = false
 )
 
 enum class ProcessingStep(val title: String, val activeActionLabel: String) {
