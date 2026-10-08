@@ -23,39 +23,108 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Generates a real, multi-phrase 9:16 vertical gaming & commentary MP4 video on-device
- * with real H.264 video frames (moving subject/character) and real AAC audio speech bursts
- * ("Aare ruko", "Kya hui", "Ye kya kar raha hai", "Ab dekho", "Bhai sahab gazab!")
- * separated by natural vocal pauses.
+ * Generates a real 9:16 vertical gaming & conversational dialogue MP4 video on-device
+ * with real H.264 video frames (moving subject/character) and real AAC speaker-turn audio:
  *
- * This allows users on any device or fresh emulator (even with an empty gallery) to
- * test the complete real pipeline:
- * IMPORT -> ANALYZE AUDIO -> DETECT SPEECH -> TRACK SUBJECT -> KEYFRAME -> SMART ZOOM -> RENDER -> EXPORT.
+ * Turn 1 (MALE, 130 Hz, 2 sub-sentences with a comma pause that MUST remain ONE segment):
+ *   "Aare ruko, tum kaha ja rahe ho? Pehle meri baat suno."
+ * Turn 2 (FEMALE, 235 Hz, complete response):
+ *   "Achha batao, kya hua?"
+ * Turn 3 (MALE, 134 Hz, 3 continuous sentences that MUST remain ONE segment):
+ *   "Ruko. Tum idhar aao. Mujhe tumse ek important baat karni hai."
+ * Turn 4 (FEMALE, 240 Hz, complete response):
+ *   "Theek hai, main sun rahi hoon, jaldi bolo!"
  */
 class DemoVideoSynthesizer(private val context: Context) {
 
-    private data class PhraseSpec(
+    private data class VocalBurstSpec(
         val startSec: Float,
         val endSec: Float,
-        val phraseText: String,
+        val speakerTag: String,
+        val captionText: String,
         val targetSubjectX: Float,
         val targetSubjectY: Float,
-        val pitchHz: Float
+        val pitchHz: Float,
+        val upperFormantBoost: Float
     )
 
-    private val phrases = listOf(
-        PhraseSpec(0.15f, 1.35f, "\"Aare ruko\"", 0.62f, 0.46f, 210f),
-        PhraseSpec(1.65f, 2.85f, "\"Kya hui\"", 0.36f, 0.44f, 245f),
-        PhraseSpec(3.15f, 4.65f, "\"Ye kya kar raha hai\"", 0.64f, 0.48f, 195f),
-        PhraseSpec(4.95f, 6.20f, "\"Ab dekho\"", 0.38f, 0.45f, 260f),
-        PhraseSpec(6.50f, 7.80f, "\"Bhai sahab gazab!\"", 0.56f, 0.43f, 230f)
+    // Notice how Turn 1 (MALE) and Turn 3 (MALE) have internal sentence/clause pauses (180ms-240ms)
+    // so the speech engine proves it merges same-speaker clauses into ONE complete turn!
+    private val vocalBursts = listOf(
+        // MALE Turn 1 (0.15s .. 2.75s) -> two sub-clauses separated by a short 180ms comma pause
+        VocalBurstSpec(
+            startSec = 0.15f,
+            endSec = 1.25f,
+            speakerTag = "MALE TURN 1",
+            captionText = "MALE: \"Aare ruko, tum kaha ja rahe ho?\"",
+            targetSubjectX = 0.62f,
+            targetSubjectY = 0.46f,
+            pitchHz = 128f,
+            upperFormantBoost = 0.22f
+        ),
+        VocalBurstSpec(
+            startSec = 1.43f,
+            endSec = 2.75f,
+            speakerTag = "MALE TURN 1",
+            captionText = "MALE: \"Pehle meri baat suno.\"",
+            targetSubjectX = 0.60f,
+            targetSubjectY = 0.46f,
+            pitchHz = 132f,
+            upperFormantBoost = 0.22f
+        ),
+
+        // FEMALE Turn 2 (3.20s .. 5.10s) -> distinct female voice (236 Hz)
+        VocalBurstSpec(
+            startSec = 3.20f,
+            endSec = 5.10f,
+            speakerTag = "FEMALE TURN 2",
+            captionText = "FEMALE: \"Achha batao, kya hua?\"",
+            targetSubjectX = 0.36f,
+            targetSubjectY = 0.44f,
+            pitchHz = 236f,
+            upperFormantBoost = 0.72f
+        ),
+
+        // MALE Turn 3 (5.55s .. 8.35s) -> three continuous sentences by Male kept as ONE segment
+        VocalBurstSpec(
+            startSec = 5.55f,
+            endSec = 6.75f,
+            speakerTag = "MALE TURN 3",
+            captionText = "MALE: \"Ruko. Tum idhar aao.\"",
+            targetSubjectX = 0.64f,
+            targetSubjectY = 0.48f,
+            pitchHz = 130f,
+            upperFormantBoost = 0.24f
+        ),
+        VocalBurstSpec(
+            startSec = 6.95f,
+            endSec = 8.35f,
+            speakerTag = "MALE TURN 3",
+            captionText = "MALE: \"Mujhe ek important baat karni hai.\"",
+            targetSubjectX = 0.61f,
+            targetSubjectY = 0.47f,
+            pitchHz = 134f,
+            upperFormantBoost = 0.24f
+        ),
+
+        // FEMALE Turn 4 (8.80s .. 10.80s) -> distinct female response (242 Hz)
+        VocalBurstSpec(
+            startSec = 8.80f,
+            endSec = 10.80f,
+            speakerTag = "FEMALE TURN 4",
+            captionText = "FEMALE: \"Theek hai, main sun rahi hoon!\"",
+            targetSubjectX = 0.38f,
+            targetSubjectY = 0.45f,
+            pitchHz = 242f,
+            upperFormantBoost = 0.75f
+        )
     )
 
     suspend fun synthesizeDemoGamingVideo(
         onProgress: suspend (String) -> Unit
     ): Uri? = withContext(Dispatchers.IO) {
         val demoDir = File(context.filesDir, "demo_videos").apply { mkdirs() }
-        val outputFile = File(demoDir, "omkar_demo_gaming_clip.mp4")
+        val outputFile = File(demoDir, "omkar_demo_speaker_turns.mp4")
         if (outputFile.exists() && outputFile.length() > 20_000L) {
             return@withContext Uri.fromFile(outputFile)
         }
@@ -63,7 +132,7 @@ class DemoVideoSynthesizer(private val context: Context) {
         val width = 544   // 9:16 vertical (multiple of 16)
         val height = 960  // 9:16 vertical (multiple of 16)
         val fps = 20
-        val totalDurationSec = 8.0f
+        val totalDurationSec = 11.0f
         val totalFrames = (totalDurationSec * fps).toInt()
 
         var videoEncoder: MediaCodec? = null
@@ -73,7 +142,7 @@ class DemoVideoSynthesizer(private val context: Context) {
         var muxerStarted = false
 
         try {
-            onProgress("Synthesizing 9:16 vertical gaming video & speech audio...")
+            onProgress("Synthesizing 9:16 vertical clip with Male/Female speaker turns...")
 
             val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
                 setInteger(
@@ -140,7 +209,7 @@ class DemoVideoSynthesizer(private val context: Context) {
             }
             val captionTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.rgb(255, 214, 0)
-                textSize = 32f
+                textSize = 24f
                 isFakeBoldText = true
                 textAlign = Paint.Align.CENTER
             }
@@ -150,8 +219,6 @@ class DemoVideoSynthesizer(private val context: Context) {
                 isFakeBoldText = true
             }
 
-            // First encode all video frames onto surface, collecting encoded packets in memory
-            // so we can start the muxer cleanly with both video and audio tracks
             data class EncodedPacket(
                 val data: ByteArray,
                 val ptsUs: Long,
@@ -166,18 +233,17 @@ class DemoVideoSynthesizer(private val context: Context) {
             val vInfo = MediaCodec.BufferInfo()
             for (frameIdx in 0 until totalFrames) {
                 val timeSec = frameIdx.toFloat() / fps.toFloat()
-                val activePhrase = phrases.firstOrNull { timeSec in it.startSec..it.endSec }
+                val activeBurst = vocalBursts.firstOrNull { timeSec in it.startSec..it.endSec }
 
-                // Compute smooth subject coordinates
-                val subjX = if (activePhrase != null) {
-                    val p = ((timeSec - activePhrase.startSec) / (activePhrase.endSec - activePhrase.startSec))
+                val subjX = if (activeBurst != null) {
+                    val p = ((timeSec - activeBurst.startSec) / (activeBurst.endSec - activeBurst.startSec))
                         .coerceIn(0f, 1f)
                     val wobble = 0.05f * sin(p * PI.toFloat() * 2f)
-                    (activePhrase.targetSubjectX + wobble).coerceIn(0.28f, 0.72f)
+                    (activeBurst.targetSubjectX + wobble).coerceIn(0.28f, 0.72f)
                 } else {
                     0.50f + 0.08f * sin(timeSec * 2.0f)
                 }
-                val subjY = activePhrase?.targetSubjectY ?: 0.46f
+                val subjY = activeBurst?.targetSubjectY ?: 0.46f
 
                 val canvas = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
                     inputSurface.lockHardwareCanvas()
@@ -188,7 +254,6 @@ class DemoVideoSynthesizer(private val context: Context) {
                 try {
                     canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-                    // Perspective arena floor lines
                     val horizonY = height * 0.62f
                     for (g in -4..4) {
                         val topX = width * 0.5f + g * 35f
@@ -200,38 +265,31 @@ class DemoVideoSynthesizer(private val context: Context) {
                         canvas.drawLine(0f, y, width.toFloat(), y, gridPaint)
                     }
 
-                    // Draw primary game character / subject at (subjX, subjY)
                     val cx = width * subjX
                     val cy = height * subjY
                     canvas.drawCircle(cx, cy, 92f, characterGlowPaint)
 
-                    // Character torso & shoulders
                     val torsoRect = RectF(cx - 48f, cy - 30f, cx + 48f, cy + 95f)
                     canvas.drawRoundRect(torsoRect, 20f, 20f, characterBodyPaint)
 
-                    // Character head & glowing visor
                     canvas.drawCircle(cx, cy - 64f, 36f, characterBodyPaint)
                     val visorRect = RectF(cx - 24f, cy - 74f, cx + 24f, cy - 54f)
                     canvas.drawRoundRect(visorRect, 8f, 8f, characterVisorPaint)
 
-                    // Energy shield / weapon prop
                     canvas.drawCircle(cx + 56f, cy + 12f, 22f, characterVisorPaint)
 
-                    // Top gaming HUD bar
                     canvas.drawText("SQUAD ARENA • 9:16 RAW CLIP", 28f, 54f, hudTextPaint)
                     canvas.drawText(String.format("TIME %.1fs", timeSec), width - 155f, 54f, hudTextPaint)
 
-                    // Spoken phrase indicator at bottom
-                    if (activePhrase != null) {
-                        val capRect = RectF(44f, height - 190f, width - 44f, height - 115f)
+                    if (activeBurst != null) {
+                        val capRect = RectF(28f, height - 190f, width - 28f, height - 115f)
                         canvas.drawRoundRect(capRect, 18f, 18f, captionBgPaint)
-                        canvas.drawText(activePhrase.phraseText, width * 0.5f, height - 142f, captionTextPaint)
+                        canvas.drawText(activeBurst.captionText, width * 0.5f, height - 142f, captionTextPaint)
                     }
                 } finally {
                     inputSurface.unlockCanvasAndPost(canvas)
                 }
 
-                // Drain available video packets
                 while (true) {
                     val outIdx = videoEncoder.dequeueOutputBuffer(vInfo, 2000L)
                     if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) break
@@ -274,7 +332,7 @@ class DemoVideoSynthesizer(private val context: Context) {
                 }
             }
 
-            // Encode real speech-cadence audio bursts separated by silent pauses
+            // Encode real speech-cadence audio bursts with distinct Male (130Hz) & Female (238Hz) voice profiles
             val totalSamples = (totalDurationSec * sampleRate).toInt()
             val samplesPerChunk = 1024
             var sampleCursor = 0
@@ -299,18 +357,20 @@ class DemoVideoSynthesizer(private val context: Context) {
                             val shortBuf = inBuf.order(ByteOrder.nativeOrder()).asShortBuffer()
                             for (s in 0 until count) {
                                 val tSec = (sampleCursor + s).toFloat() / sampleRate.toFloat()
-                                val phrase = phrases.firstOrNull { tSec in it.startSec..it.endSec }
-                                val sampleVal: Short = if (phrase != null) {
-                                    // Synthesize multi-syllable speech formant burst (f0 + 2*f0 + 3*f0 modulated at 5Hz syllable rate)
-                                    val localT = tSec - phrase.startSec
-                                    val syllableEnv = (0.55 + 0.45 * sin(2.0 * PI * 4.5 * localT)).toFloat()
-                                    val f0 = phrase.pitchHz
-                                    val wave = (0.50f * sin(2.0 * PI * f0 * tSec) +
-                                        0.30f * sin(2.0 * PI * (f0 * 2.1f) * tSec) +
-                                        0.20f * cos(2.0 * PI * 680.0 * tSec)).toFloat()
-                                    (wave * syllableEnv * 18000f).toInt().coerceIn(-32000, 32000).toShort()
+                                val burst = vocalBursts.firstOrNull { tSec in it.startSec..it.endSec }
+                                val sampleVal: Short = if (burst != null) {
+                                    val localT = tSec - burst.startSec
+                                    val syllableEnv = (0.60 + 0.40 * sin(2.0 * PI * 4.2 * localT)).toFloat()
+                                    val f0 = burst.pitchHz
+                                    val lowWeight = 1.0f - burst.upperFormantBoost * 0.55f
+                                    val highWeight = burst.upperFormantBoost
+                                    val wave = (
+                                        lowWeight * sin(2.0 * PI * f0 * tSec) +
+                                            0.35f * sin(2.0 * PI * (f0 * 2.0f) * tSec) +
+                                            highWeight * cos(2.0 * PI * 720.0 * tSec)
+                                        ).toFloat()
+                                    (wave * syllableEnv * 16500f).toInt().coerceIn(-32000, 32000).toShort()
                                 } else {
-                                    // Clean pause silence between phrases so VAD splits cleanly
                                     0
                                 }
                                 shortBuf.put(sampleVal)
@@ -341,7 +401,6 @@ class DemoVideoSynthesizer(private val context: Context) {
                 }
             }
 
-            // Write video & audio tracks to MediaMuxer
             if (outVideoFormat != null && videoPackets.isNotEmpty()) {
                 val vTrack = muxer.addTrack(outVideoFormat)
                 val aTrack = if (outAudioFormat != null && audioPackets.isNotEmpty()) {
