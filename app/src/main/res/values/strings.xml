@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">OMKAR AUTOCUT</string>
+    <string name="app_tagline">AI POWERED AUTO VIDEO EDITOR</string>
+    <string name="import_video">+ IMPORT VIDEO</string>
+    <string name="auto_cut_now">AUTO CUT NOW</string>
+    <string name="auto_cut">AUTO CUT</string>
+    <string name="recent_projects">RECENT PROJECTS</string>
+    <string name="autocut_history">AUTOCUT HISTORY</string>
+    <string name="settings_title">STUDIO SETTINGS</string>
+    <string name="preview_auto_edit">PREVIEW AUTO EDIT</string>
+    <string name="export_video">EXPORT VIDEO</string>
+    <string name="video_exported_successfully">VIDEO EXPORTED SUCCESSFULLY</string>
+    <string name="open_video">OPEN VIDEO</string>
+    <string name="edit_another_video">EDIT ANOTHER VIDEO</string>
+    <string name="load_demo_video">GENERATE &amp; LOAD SAMPLE GAMING VIDEO</string>
+    <string name="error_unsupported_video">Unsupported video format. Please select an MP4, WebM, or MKV video file.</string>
+    <string name="error_missing_audio">No audio track found in video. Using visual motion cadence for smart cuts.</string>
+    <string name="error_speech_not_detected">Minimal speech detected. Generated adaptive phrase cuts from vocal/motion peaks.</string>
+    <string name="error_corrupted_video">The selected video file appears corrupted or unreadable.</string>
+    <string name="error_insufficient_storage">Insufficient device storage to render the video.</string>
+    <string name="error_rendering_failed">Video rendering encountered an error. Please try adjusting resolution or retrying.</string>
+</resources>

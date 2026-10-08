@@ -1,0 +1,6 @@
+{
+  "name": "OMKAR AUTOCUT",
+  "description": "AI-powered automatic video editing studio with speech-based smart cuts, subject tracking, alternating camera pans, and smart zoom keyframes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
