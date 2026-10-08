@@ -17,6 +17,12 @@ local.properties
 .env
 debug.keystore
 /release/
+/.build-outputs/
+.build-outputs/
+*.apk
+*.aab
+*.ap_
+*.dex
 !gradle/wrapper/gradle-wrapper.jar
 !gradlew
 !gradlew.bat
