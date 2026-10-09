@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-apk:
@@ -23,6 +23,7 @@ jobs:
         run: |
           rm -rf .build-outputs build app/build artifact-output
           find . -name "*.apk" -type f -delete || true
+          find . -name "*.aab" -type f -delete || true
 
       - name: Set up JDK 21 (Temurin)
         uses: actions/setup-java@v5
@@ -35,7 +36,7 @@ jobs:
         with:
           packages: 'platform-tools'
 
-      - name: Accept Android SDK licenses and install required SDK components
+      - name: Accept Android SDK licenses and install required stable SDK components
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
           mkdir -p "${SDK_ROOT}/licenses"
@@ -47,10 +48,7 @@ jobs:
           printf "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n" > "${SDK_ROOT}/licenses/google-gdk-license"
           printf "\ne9acab5b5fbb560a72cfaecce8946896ff6aab9d\n" > "${SDK_ROOT}/licenses/mips-android-sysimage-license"
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" || true
-          sdkmanager "build-tools;36.0.0" || sdkmanager "build-tools;35.0.0" || true
-          sdkmanager "platforms;android-36" || true
-          sdkmanager "platforms;android-36.1" || sdkmanager --channel=3 "platforms;android-36.1" || true
+          sdkmanager "platform-tools" "build-tools;36.0.0" "platforms;android-36" "platforms;android-35" || true
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -104,7 +102,7 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Automatically locate and verify generated Android APK
+      - name: Automatically locate and validate generated Android APK
         id: verify_apk
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}"
@@ -133,12 +131,12 @@ jobs:
 
           APK_SIZE=$(stat -c%s "${FOUND_APK}")
           echo "Generated APK size: ${APK_SIZE} bytes"
-          if [ "${APK_SIZE}" -le 0 ]; then
-            echo "ERROR: Generated APK is empty (0 bytes)."
+          if [ "${APK_SIZE}" -lt 5000000 ]; then
+            echo "ERROR: Generated APK is empty or suspiciously small (${APK_SIZE} bytes)."
             exit 1
           fi
 
-          echo "=== 2. Aligning and signing APK (v1 + v2 + v3 schemes) ==="
+          echo "=== 2. Aligning (4-byte & 4KB page-aligned) and signing APK (v1 + v2 + v3 schemes) ==="
           mkdir -p artifact-output
           STAGED_APK="artifact-output/OMKAR-AUTOCUT-debug.apk"
           "${BUILD_TOOLS}/zipalign" -f -p 4 "${FOUND_APK}" "${STAGED_APK}"
@@ -148,67 +146,97 @@ jobs:
             --ks-pass pass:android \
             --key-pass pass:android \
             --ks-key-alias androiddebugkey \
+            --min-sdk-version 21 \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
+            --v4-signing-enabled false \
             "${STAGED_APK}"
 
-          echo "=== 3. Verifying APK existence, non-zero size, and ZIP integrity ==="
+          rm -f "${STAGED_APK}.idsig"
+
+          echo "=== 3. Verifying APK existence, size, and ZIP integrity ==="
           if [ ! -f "${STAGED_APK}" ] || [ ! -s "${STAGED_APK}" ]; then
             echo "ERROR: Staged APK is missing or empty at ${STAGED_APK}"
             exit 1
           fi
           FINAL_SIZE=$(stat -c%s "${STAGED_APK}")
-          if [ "${FINAL_SIZE}" -lt 1000000 ]; then
-            echo "ERROR: Staged APK size (${FINAL_SIZE} bytes) is invalid or truncated."
+          echo "Final signed APK size: ${FINAL_SIZE} bytes"
+          if [ "${FINAL_SIZE}" -lt 5000000 ]; then
+            echo "ERROR: Final signed APK size (${FINAL_SIZE} bytes) is invalid or truncated."
             exit 1
           fi
           unzip -t "${STAGED_APK}" > /dev/null
 
-          echo "=== 4. Verifying required Android APK structure ==="
+          echo "=== 4. Verifying required Android APK structure and native ABIs ==="
           APK_LIST=$(unzip -Z1 "${STAGED_APK}")
           echo "${APK_LIST}" | grep -qx "AndroidManifest.xml" || { echo "ERROR: Missing AndroidManifest.xml"; exit 1; }
           echo "${APK_LIST}" | grep -qx "classes.dex" || { echo "ERROR: Missing classes.dex"; exit 1; }
           echo "${APK_LIST}" | grep -qx "resources.arsc" || { echo "ERROR: Missing resources.arsc"; exit 1; }
+          echo "${APK_LIST}" | grep -q "^META-INF/.*\.SF$" || { echo "ERROR: Missing META-INF v1 signature block"; exit 1; }
           echo "${APK_LIST}" | grep -q "^lib/arm64-v8a/" || { echo "ERROR: Missing arm64-v8a native libraries"; exit 1; }
           echo "${APK_LIST}" | grep -q "^lib/armeabi-v7a/" || { echo "ERROR: Missing armeabi-v7a native libraries"; exit 1; }
 
-          echo "=== 5. Verifying zipalign, apksigner signatures, and AndroidManifest badging ==="
+          echo "=== 5. Verifying zipalign, apksigner (v1+v2+v3), and AndroidManifest package parsing ==="
           "${BUILD_TOOLS}/zipalign" -c 4 "${STAGED_APK}"
 
-          SIGN_OUT=$("${BUILD_TOOLS}/apksigner" verify --verbose --print-certs "${STAGED_APK}")
+          SIGN_OUT=$("${BUILD_TOOLS}/apksigner" verify --min-sdk-version 21 --verbose --print-certs "${STAGED_APK}")
           echo "${SIGN_OUT}"
           echo "${SIGN_OUT}" | grep -q "^Verifies" || { echo "ERROR: APK signature verification failed"; exit 1; }
+          echo "${SIGN_OUT}" | grep -q "Verified using v1 scheme (JAR signing): true" || { echo "ERROR: v1 signature missing"; exit 1; }
           echo "${SIGN_OUT}" | grep -q "Verified using v2 scheme (APK Signature Scheme v2): true" || { echo "ERROR: v2 signature missing"; exit 1; }
           echo "${SIGN_OUT}" | grep -q "Verified using v3 scheme (APK Signature Scheme v3): true" || { echo "ERROR: v3 signature missing"; exit 1; }
 
           BADGING=$("${BUILD_TOOLS}/aapt2" dump badging "${STAGED_APK}")
-          echo "${BADGING}" | head -n 20
+          echo "${BADGING}" | head -n 25
           echo "${BADGING}" | grep -q "package: name='com.aistudio.omkarautocut.vxrplq'" || { echo "ERROR: Invalid package name"; exit 1; }
+          echo "${BADGING}" | grep -q "minSdkVersion:'24'" || { echo "ERROR: Unexpected minSdkVersion"; exit 1; }
+          echo "${BADGING}" | grep -q "targetSdkVersion:'35'" || { echo "ERROR: Unexpected targetSdkVersion"; exit 1; }
           echo "${BADGING}" | grep -q "launchable-activity: name='com.example.MainActivity'" || { echo "ERROR: Missing launchable MainActivity"; exit 1; }
 
           echo "apk_path=${STAGED_APK}" >> "${GITHUB_OUTPUT}"
+          echo "apk_size=${FINAL_SIZE}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload OMKAR-AUTOCUT-APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: OMKAR-AUTOCUT-APK
           path: ${{ steps.verify_apk.outputs.apk_path }}
+          compression-level: 0
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish direct unzipped .apk file to GitHub Releases for instant Android installation
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="latest-apk"
+          APK_FILE="${{ steps.verify_apk.outputs.apk_path }}"
+          if gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" "${APK_FILE}#OMKAR-AUTOCUT-debug.apk" --clobber --repo "${GITHUB_REPOSITORY}" || true
+          else
+            gh release create "${TAG_NAME}" "${APK_FILE}#OMKAR-AUTOCUT-debug.apk" \
+              --title "OMKAR AUTOCUT Latest Installable APK" \
+              --notes "Direct installable Android APK (OMKAR-AUTOCUT-debug.apk) built by GitHub Actions." \
+              --repo "${GITHUB_REPOSITORY}" || true
+          fi
+
       - name: Confirm APK Ready for Download
         run: |
+          DIRECT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/latest-apk/OMKAR-AUTOCUT-debug.apk"
           echo "=========================================="
           echo "BUILD SUCCESSFUL"
           echo "APK READY FOR DOWNLOAD"
           echo "Artifact Name: OMKAR-AUTOCUT-APK"
-          echo "File: ${{ steps.verify_apk.outputs.apk_path }}"
+          echo "File: ${{ steps.verify_apk.outputs.apk_path }} (${{ steps.verify_apk.outputs.apk_size }} bytes)"
+          echo "Direct Unzipped APK URL: ${DIRECT_URL}"
           echo "=========================================="
           {
             echo "## BUILD SUCCESSFUL"
             echo "### APK READY FOR DOWNLOAD"
-            echo "- **Artifact Name:** \`OMKAR-AUTOCUT-APK\`"
-            echo "- **APK File:** \`OMKAR-AUTOCUT-debug.apk\`"
-            echo "- **Download:** Open **GitHub → Actions → Successful workflow → Artifacts → OMKAR-AUTOCUT-APK**."
+            echo "- **Direct `.apk` Download (No ZIP — Tap to Install on Android):** [Download OMKAR-AUTOCUT-debug.apk](${DIRECT_URL})"
+            echo "- **GitHub Actions Artifact Name:** \`OMKAR-AUTOCUT-APK\`"
+            echo "- **APK File Inside Artifact:** \`OMKAR-AUTOCUT-debug.apk\` (\`${{ steps.verify_apk.outputs.apk_size }}\` bytes)"
+            echo "- **Note for Android Users:** When downloading from the **Artifacts** section below, GitHub automatically wraps artifacts in \`OMKAR-AUTOCUT-APK.zip\`. Extract the \`.zip\` first (do **not** rename \`.zip\` to \`.apk\`) to install \`OMKAR-AUTOCUT-debug.apk\`, or use the **Direct \`.apk\` Download** link above."
           } >> "${GITHUB_STEP_SUMMARY}"

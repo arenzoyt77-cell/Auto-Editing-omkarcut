@@ -287,7 +287,8 @@ fun OmkarAutoCutApp(
                         onShareVideoClick = { viewModel.shareExportedVideo() },
                         onCloseModalPlayer = { viewModel.closeInAppExportPlayerModal() },
                         onEditAnotherVideoClick = { viewModel.editAnotherVideo() },
-                        onBackToTimelineClick = { viewModel.navigateBack() }
+                        onBackToTimelineClick = { viewModel.navigateBack() },
+                        onRetrySaveToGalleryClick = { viewModel.retrySaveToGallery() }
                     )
                 }
 
@@ -310,8 +311,14 @@ fun OmkarAutoCutApp(
                     .padding(14.dp)
             ) {
                 uiState.activeBannerError?.let { err ->
+                    val canRetryExport = !err.isWarningOnly &&
+                        uiState.importedVideo != null &&
+                        uiState.segments.isNotEmpty()
                     ErrorDiagnosticBanner(
                         error = err,
+                        onRetry = if (canRetryExport) {
+                            { viewModel.retryExportOrSave() }
+                        } else null,
                         onDismiss = { viewModel.dismissErrorBanner() }
                     )
                 }
@@ -323,6 +330,7 @@ fun OmkarAutoCutApp(
 @Composable
 private fun ErrorDiagnosticBanner(
     error: AutoCutError,
+    onRetry: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val accent = if (error.isWarningOnly) KeyframeAmber else SplitCrimson
@@ -362,6 +370,18 @@ private fun ErrorDiagnosticBanner(
                     text = "Tip: ${error.recoveryHint}",
                     style = MaterialTheme.typography.labelSmall,
                     color = TextSecondary
+                )
+            }
+        }
+
+        if (onRetry != null) {
+            androidx.compose.material3.TextButton(
+                onClick = onRetry
+            ) {
+                Text(
+                    text = "RETRY",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = KeyframeAmber
                 )
             }
         }

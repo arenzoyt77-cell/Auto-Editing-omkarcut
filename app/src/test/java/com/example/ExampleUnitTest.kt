@@ -317,4 +317,47 @@ class ExampleUnitTest {
         )
         assertFalse("Validator must reject non-monotonic mid-video timestamp reset", validReset)
     }
+
+    @Test
+    fun exportGalleryAutoSave_usesMoviesOmkarAutoCutPath_uniqueFilename_andRejectsCorruptedFiles() {
+        assertEquals("Movies/OMKAR AUTOCUT/", com.example.engine.ExportGalleryManager.GALLERY_DISPLAY_FOLDER)
+        assertEquals("OMKAR AUTOCUT", com.example.engine.ExportGalleryManager.GALLERY_SUBFOLDER_NAME)
+        assertEquals(
+            "Export complete! Video saved to Gallery ✅",
+            com.example.engine.ExportGalleryManager.COMPLETION_BANNER_MESSAGE
+        )
+
+        val tempDir = kotlin.io.path.createTempDirectory("autocut_test").toFile()
+        try {
+            val fixedDate = java.util.Date(1728475200000L)
+            val name1 = VideoRenderingEngine.generateUniqueExportFileName(tempDir, fixedDate)
+            assertTrue(name1.startsWith("OMKAR_AUTOCUT_") && name1.endsWith(".mp4"))
+            java.io.File(tempDir, name1).writeBytes(ByteArray(128))
+
+            // Second export in the same second must still receive a unique filename
+            val name2 = VideoRenderingEngine.generateUniqueExportFileName(tempDir, fixedDate)
+            assertTrue(name2 != name1 && name2.endsWith("_2.mp4"))
+
+            // Incomplete / empty / non-MP4 files must be rejected before saving to Gallery
+            val emptyFile = java.io.File(tempDir, "empty.mp4").apply { writeBytes(ByteArray(0)) }
+            assertFalse(com.example.engine.ExportGalleryManager.isMp4HeaderAndSizeValid(emptyFile))
+
+            val corruptedFile = java.io.File(tempDir, "corrupted.mp4").apply { writeBytes(ByteArray(2048) { 0x42 }) }
+            assertFalse(com.example.engine.ExportGalleryManager.isMp4HeaderAndSizeValid(corruptedFile))
+
+            val validHeaderBytes = ByteArray(2048)
+            validHeaderBytes[4] = 'f'.code.toByte()
+            validHeaderBytes[5] = 't'.code.toByte()
+            validHeaderBytes[6] = 'y'.code.toByte()
+            validHeaderBytes[7] = 'p'.code.toByte()
+            val validHeaderFile = java.io.File(tempDir, "valid_header.mp4").apply { writeBytes(validHeaderBytes) }
+            assertTrue(com.example.engine.ExportGalleryManager.isMp4HeaderAndSizeValid(validHeaderFile))
+
+            val dedupKey1 = com.example.engine.ExportGalleryManager.buildExportDedupKey(validHeaderFile)
+            val dedupKey2 = com.example.engine.ExportGalleryManager.buildExportDedupKey(validHeaderFile)
+            assertEquals("Same exported file must produce identical deduplication key", dedupKey1, dedupKey2)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }

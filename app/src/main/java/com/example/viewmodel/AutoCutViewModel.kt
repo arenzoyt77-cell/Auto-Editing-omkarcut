@@ -680,7 +680,7 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // --- Section 13 & 14: Export & Save to Gallery ---
+    // --- Section 13 & 14: Export & Auto-Save to Gallery ---
 
     fun exportFinalVideo() {
         val metadata = _uiState.value.importedVideo ?: return
@@ -693,13 +693,14 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                 it.copy(
                     currentScreen = AppScreen.EXPORTING,
                     isPlayingPreview = false,
+                    activeBannerError = null,
                     exportState = ExportProgressState(
                         isExporting = true,
                         progressPercent = 2,
-                        currentStageLabel = "Analyzing video...",
+                        currentStageLabel = "Preparing export pipeline...",
                         currentFrame = 0,
                         totalFrames = 100,
-                        estimatedRemainingSec = 8
+                        estimatedRemainingSec = 5
                     )
                 )
             }
@@ -726,7 +727,7 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                         it.copy(
                             exportState = it.exportState.copy(
                                 progressPercent = 98,
-                                currentStageLabel = "Saving to Android Gallery...",
+                                currentStageLabel = "Saving to Gallery (${ExportGalleryManager.GALLERY_DISPLAY_FOLDER})...",
                                 estimatedRemainingSec = 1
                             )
                         )
@@ -740,41 +741,81 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                         validatedHeight = renderResult.outputHeight
                     )
 
-                    val exportEntity = ExportHistoryEntity(
-                        fileName = renderResult.fileName,
-                        exportedFilePath = renderResult.outputFile.absolutePath,
-                        mediaStoreUri = galleryResult.mediaStoreUri?.toString() ?: "",
-                        resolution = metadata.resolutionText,
-                        durationMs = renderResult.renderedDurationMs,
-                        segmentCount = segments.size,
-                        fileSizeBytes = galleryResult.fileSizeBytes
-                    )
-                    repository.recordExport(exportEntity)
-
-                    // Update project with last exported path
-                    saveOrUpdateCurrentProject(
-                        metadata = metadata,
-                        segments = segments,
-                        lastExportedPath = renderResult.outputFile.absolutePath,
-                        lastExportedUri = galleryResult.mediaStoreUri?.toString()
-                    )
-
-                    _uiState.update {
-                        it.copy(
-                            currentScreen = AppScreen.EXPORT_SUCCESS,
-                            exportState = ExportProgressState(
-                                isExporting = false,
-                                progressPercent = 100,
-                                currentStageLabel = "VIDEO EXPORTED SUCCESSFULLY",
-                                currentFrame = renderResult.totalRenderedFrames,
-                                totalFrames = renderResult.totalRenderedFrames,
-                                estimatedRemainingSec = 0,
-                                exportedFilePath = renderResult.outputFile.absolutePath,
-                                exportedMediaStoreUri = galleryResult.mediaStoreUri?.toString(),
-                                exportedFileName = renderResult.fileName,
-                                exportedFileSizeBytes = galleryResult.fileSizeBytes
-                            )
+                    if (galleryResult.success) {
+                        val exportEntity = ExportHistoryEntity(
+                            fileName = renderResult.fileName,
+                            exportedFilePath = renderResult.outputFile.absolutePath,
+                            mediaStoreUri = galleryResult.mediaStoreUri?.toString() ?: "",
+                            resolution = metadata.resolutionText,
+                            durationMs = renderResult.renderedDurationMs,
+                            segmentCount = segments.size,
+                            fileSizeBytes = galleryResult.fileSizeBytes
                         )
+                        repository.recordExport(exportEntity)
+
+                        saveOrUpdateCurrentProject(
+                            metadata = metadata,
+                            segments = segments,
+                            lastExportedPath = renderResult.outputFile.absolutePath,
+                            lastExportedUri = galleryResult.mediaStoreUri?.toString()
+                        )
+
+                        _uiState.update {
+                            it.copy(
+                                currentScreen = AppScreen.EXPORT_SUCCESS,
+                                activeBannerError = null,
+                                exportState = ExportProgressState(
+                                    isExporting = false,
+                                    progressPercent = 100,
+                                    currentStageLabel = ExportGalleryManager.COMPLETION_BANNER_MESSAGE,
+                                    currentFrame = renderResult.totalRenderedFrames,
+                                    totalFrames = renderResult.totalRenderedFrames,
+                                    estimatedRemainingSec = 0,
+                                    exportedFilePath = renderResult.outputFile.absolutePath,
+                                    exportedMediaStoreUri = galleryResult.mediaStoreUri?.toString(),
+                                    exportedFileName = renderResult.fileName,
+                                    exportedFileSizeBytes = galleryResult.fileSizeBytes,
+                                    exportedDurationMs = renderResult.renderedDurationMs,
+                                    exportedWidth = renderResult.outputWidth,
+                                    exportedHeight = renderResult.outputHeight,
+                                    isSavedToGallery = true,
+                                    gallerySaveStatusText = ExportGalleryManager.COMPLETION_BANNER_MESSAGE,
+                                    gallerySaveError = null
+                                )
+                            )
+                        }
+                    } else {
+                        val errMsg = galleryResult.errorMessage
+                            ?: "Could not save exported video to Android Gallery (${ExportGalleryManager.GALLERY_DISPLAY_FOLDER})."
+                        _uiState.update {
+                            it.copy(
+                                currentScreen = AppScreen.EXPORT_SUCCESS,
+                                activeBannerError = AutoCutError(
+                                    kind = ErrorKind.RENDERING_FAILURE,
+                                    title = "Gallery Auto-Save Failed",
+                                    message = errMsg,
+                                    recoveryHint = "Tap RETRY SAVE TO GALLERY below to try saving again."
+                                ),
+                                exportState = ExportProgressState(
+                                    isExporting = false,
+                                    progressPercent = 100,
+                                    currentStageLabel = "Export finished — Gallery save failed",
+                                    currentFrame = renderResult.totalRenderedFrames,
+                                    totalFrames = renderResult.totalRenderedFrames,
+                                    estimatedRemainingSec = 0,
+                                    exportedFilePath = renderResult.outputFile.absolutePath,
+                                    exportedMediaStoreUri = null,
+                                    exportedFileName = renderResult.fileName,
+                                    exportedFileSizeBytes = renderResult.outputFile.length(),
+                                    exportedDurationMs = renderResult.renderedDurationMs,
+                                    exportedWidth = renderResult.outputWidth,
+                                    exportedHeight = renderResult.outputHeight,
+                                    isSavedToGallery = false,
+                                    gallerySaveStatusText = errMsg,
+                                    gallerySaveError = errMsg
+                                )
+                            )
+                        }
                     }
                 }
                 is RenderResult.Failure -> {
@@ -787,6 +828,112 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Retries saving an already-exported video to the Android Gallery without duplicating saves,
+     * or re-runs the full export if the exported file is not present on disk.
+     */
+    fun retrySaveToGallery() {
+        val currentExport = _uiState.value.exportState
+        if (currentExport.isSavedToGallery && !currentExport.exportedMediaStoreUri.isNullOrBlank()) {
+            // Prevent duplicate saving of the same export
+            return
+        }
+        val path = currentExport.exportedFilePath
+        val fileName = currentExport.exportedFileName
+        val renderedFile = if (!path.isNullOrBlank()) File(path) else null
+        if (renderedFile == null || !renderedFile.exists() || fileName.isNullOrBlank()) {
+            exportFinalVideo()
+            return
+        }
+
+        val metadata = _uiState.value.importedVideo
+        val segments = _uiState.value.segments
+
+        activeJob?.cancel()
+        activeJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    activeBannerError = null,
+                    exportState = it.exportState.copy(
+                        gallerySaveStatusText = "Retrying save to Gallery (${ExportGalleryManager.GALLERY_DISPLAY_FOLDER})...",
+                        gallerySaveError = null
+                    )
+                )
+            }
+
+            val galleryResult = galleryManager.saveVideoToGallery(
+                renderedFile = renderedFile,
+                fileName = fileName,
+                validatedDurationMs = currentExport.exportedDurationMs,
+                validatedWidth = currentExport.exportedWidth,
+                validatedHeight = currentExport.exportedHeight
+            )
+
+            if (galleryResult.success) {
+                if (metadata != null && !galleryResult.alreadySaved) {
+                    val exportEntity = ExportHistoryEntity(
+                        fileName = fileName,
+                        exportedFilePath = renderedFile.absolutePath,
+                        mediaStoreUri = galleryResult.mediaStoreUri?.toString() ?: "",
+                        resolution = metadata.resolutionText,
+                        durationMs = currentExport.exportedDurationMs,
+                        segmentCount = segments.size,
+                        fileSizeBytes = galleryResult.fileSizeBytes
+                    )
+                    repository.recordExport(exportEntity)
+                    saveOrUpdateCurrentProject(
+                        metadata = metadata,
+                        segments = segments,
+                        lastExportedPath = renderedFile.absolutePath,
+                        lastExportedUri = galleryResult.mediaStoreUri?.toString()
+                    )
+                }
+
+                _uiState.update {
+                    it.copy(
+                        currentScreen = AppScreen.EXPORT_SUCCESS,
+                        activeBannerError = null,
+                        exportState = it.exportState.copy(
+                            currentStageLabel = ExportGalleryManager.COMPLETION_BANNER_MESSAGE,
+                            exportedMediaStoreUri = galleryResult.mediaStoreUri?.toString(),
+                            exportedFileSizeBytes = galleryResult.fileSizeBytes,
+                            isSavedToGallery = true,
+                            gallerySaveStatusText = ExportGalleryManager.COMPLETION_BANNER_MESSAGE,
+                            gallerySaveError = null
+                        )
+                    )
+                }
+            } else {
+                val errMsg = galleryResult.errorMessage
+                    ?: "Failed to save video to Gallery (${ExportGalleryManager.GALLERY_DISPLAY_FOLDER}). Please try again."
+                _uiState.update {
+                    it.copy(
+                        activeBannerError = AutoCutError(
+                            kind = ErrorKind.RENDERING_FAILURE,
+                            title = "Gallery Save Failed",
+                            message = errMsg,
+                            recoveryHint = "Check available device storage and tap RETRY SAVE TO GALLERY."
+                        ),
+                        exportState = it.exportState.copy(
+                            isSavedToGallery = false,
+                            gallerySaveStatusText = errMsg,
+                            gallerySaveError = errMsg
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    fun retryExportOrSave() {
+        val state = _uiState.value
+        if (state.currentScreen == AppScreen.EXPORT_SUCCESS && !state.exportState.isSavedToGallery) {
+            retrySaveToGallery()
+        } else if (state.importedVideo != null && state.segments.isNotEmpty()) {
+            exportFinalVideo()
         }
     }
 

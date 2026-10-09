@@ -65,21 +65,21 @@ data class Mp4ValidationReport(
 )
 
 /**
- * Hardware-Accelerated Android Video & Audio Rendering Engine (Smooth Playback & Zero-Stutter Pipeline).
+ * Hardware-Accelerated Android Video & Audio Rendering Engine (High-Speed Streaming Pipeline).
  *
  * Key Optimizations:
- * 1. Sequential Hardware `MediaCodec` + `MediaExtractor` Frame Decoder (`SequentialVideoFrameDecoder`):
- *    Decodes every source frame sequentially into a single pre-allocated reusable `Bitmap` and `IntArray`
- *    buffer without per-frame seeking, duplicate frames, or Bitmap GC churn.
- * 2. Single Continuous Hardware H.264 Encoder Session:
- *    Encodes all segments continuously with unified SPS/PPS (`csd-0`/`csd-1`), `KEY_MAX_B_FRAMES = 0`
- *    (zero B-frame PTS/DTS reordering jitter), and a normal 2-second keyframe interval (`KEY_I_FRAME_INTERVAL = 2`).
- * 3. Preserves Source FPS (24/25/30/50/60 FPS CFR) without duplicating frames or converting 30 FPS to 60 FPS.
- * 4. Smart Resolution & Bitrate Scaling:
- *    Supports up to `1080 × 1920` (1080p) by default (or Original 4K when enabled), never upscales
- *    lower-resolution videos, and uses balanced H.264 bitrates (10 Mbps for 1080p30, 14.5 Mbps for 1080p60).
- * 5. Strict Timestamp Reset (`setpts=PTS-STARTPTS` & `asetpts=PTS-STARTPTS`) and continuous monotonic
- *    timeline starting at `00:00:00.000` (`0L` us), validated prior to MediaStore insertion.
+ * 1. Hardware-Accelerated `MediaCodec` Encoding with Safe Software-Encoding Fallback:
+ *    Prefers hardware AVC encoders configured with high offline operating-rate hints (`KEY_OPERATING_RATE`,
+ *    `KEY_PRIORITY = 0`) so hardware encodes at burst speed without reducing bitrate or visual quality,
+ *    and automatically falls back to software AVC encoding if hardware encoding is unavailable.
+ * 2. Zero-Copy Streaming `MediaMuxer` Pipeline (Avoids Loading Entire Video into RAM):
+ *    Streams encoded H.264 output `ByteBuffer`s directly from `MediaCodec` into `MediaMuxer` interleaved
+ *    with audio packets as frames are encoded, eliminating per-frame `ByteArray` allocations and full-video
+ *    RAM buffering.
+ * 3. Fast Sequential Frame Decoding & Vectorized Plane-Buffered YUV->RGB Conversion:
+ *    Reuses pre-allocated `Bitmap`, `IntArray`, and plane `ByteArray` buffers with hoisted rotation indexing
+ *    and 4:2:0 chroma reuse, plus non-blocking input/output buffer polling to eliminate idle sleep overhead.
+ * 4. Preserves Original Video FPS, Resolution, Audio Quality, Synchronization, and Exact Duration.
  */
 class VideoRenderingEngine(
     private val context: Context,
@@ -92,11 +92,32 @@ class VideoRenderingEngine(
         val flags: Int
     )
 
+    private data class ConfiguredVideoEncoder(
+        val codec: MediaCodec,
+        val inputSurface: Surface,
+        val isHardwareAccelerated: Boolean
+    )
+
     companion object {
         const val INVALID_EXPORT_USER_MESSAGE =
             "Export failed — rendering produced an invalid video. Please try again."
 
         private const val H264_KEYFRAME_INTERVAL_SEC = 2
+
+        /**
+         * Generates a unique export filename matching "OMKAR_AUTOCUT_YYYYMMDD_HHMMSS.mp4".
+         */
+        internal fun generateUniqueExportFileName(exportDir: File, date: Date = Date()): String {
+            val timestampStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(date)
+            val baseName = "OMKAR_AUTOCUT_${timestampStr}"
+            var candidate = "${baseName}.mp4"
+            var suffix = 2
+            while (File(exportDir, candidate).exists()) {
+                candidate = "${baseName}_${suffix}.mp4"
+                suffix++
+            }
+            return candidate
+        }
 
         /**
          * Section 2: Preserve source FPS with stable Constant Frame Rate (CFR).
@@ -179,7 +200,7 @@ class VideoRenderingEngine(
         ): List<Long> {
             val safeFps = cfrFps.coerceIn(15, 60)
             val frameDurationUs = (1_000_000.0 / safeFps.toDouble()).roundToLong()
-            val result = mutableListOf<Long>()
+            val result = ArrayList<Long>()
             var segmentBaseOffsetUs = 0L
 
             for (segDurMs in segmentDurationsMs) {
@@ -210,7 +231,7 @@ class VideoRenderingEngine(
             if (inRange.isEmpty()) return emptyList()
 
             val firstSampleUs = inRange.first()
-            val normalizedContinuous = mutableListOf<Long>()
+            val normalizedContinuous = ArrayList<Long>(inRange.size)
             var lastLocalUs = -1L
             val minAudioStepUs = 1000L
 
@@ -306,6 +327,17 @@ class VideoRenderingEngine(
 
             return true to null
         }
+
+        internal fun isHardwareCodecInfo(info: MediaCodecInfo): Boolean {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                info.isHardwareAccelerated && !info.isSoftwareOnly
+            } else {
+                val lower = info.name.lowercase(Locale.US)
+                !lower.startsWith("omx.google.") &&
+                    !lower.startsWith("c2.android.") &&
+                    !lower.contains(".sw.")
+            }
+        }
     }
 
     suspend fun renderEditedVideo(
@@ -313,7 +345,7 @@ class VideoRenderingEngine(
         segments: List<VideoSegment>,
         config: AutoCutConfig,
         onProgress: suspend (percent: Int, stage: String, currentFrame: Int, totalFrames: Int, etaSec: Int) -> Unit
-    ): RenderResult = withContext(Dispatchers.IO) {
+    ): RenderResult = withContext(Dispatchers.Default) {
         if (segments.isEmpty()) {
             return@withContext RenderResult.Failure(
                 AutoCutError(
@@ -325,24 +357,17 @@ class VideoRenderingEngine(
             )
         }
 
-        val timestampStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val outputFileName = "OMKAR_AUTOCUT_${timestampStr}.mp4"
         val exportDir = File(context.filesDir, "rendered_exports").apply { mkdirs() }
         exportDir.listFiles()
             ?.sortedByDescending { it.lastModified() }
             ?.drop(4)
             ?.forEach { it.delete() }
 
+        val outputFileName = generateUniqueExportFileName(exportDir)
         val outputFile = File(exportDir, outputFileName)
         if (outputFile.exists()) outputFile.delete()
 
         val startTimeWallMs = System.currentTimeMillis()
-
-        onProgress(4, "Analyzing video...", 0, 100, 8)
-        onProgress(8, "Detecting speech...", 0, 100, 7)
-        onProgress(12, "Creating cuts...", 0, 100, 6)
-        onProgress(16, "Tracking subject...", 0, 100, 6)
-        onProgress(20, "Creating keyframes...", 0, 100, 5)
 
         val targetCfrFps = determineTargetCfrFps(metadata.fps)
         val frameDurationUs = (1_000_000.0 / targetCfrFps.toDouble()).roundToLong()
@@ -361,6 +386,8 @@ class VideoRenderingEngine(
         val totalExpectedFrames = segmentFrameCounts.sum().coerceAtLeast(1)
         val expectedTotalDurationMs = ((totalExpectedFrames * frameDurationUs) / 1000L).coerceAtLeast(100L)
 
+        onProgress(10, "Preparing audio & hardware codec pipeline...", 0, totalExpectedFrames, 4)
+
         var encoder: MediaCodec? = null
         var inputSurface: Surface? = null
         var muxer: MediaMuxer? = null
@@ -378,6 +405,18 @@ class VideoRenderingEngine(
                 frameDurationUs = frameDurationUs
             )
 
+            val maxAllowedAudioPtsUs = totalExpectedFrames * frameDurationUs
+            val synchronizedAudioPackets = ArrayList<EncodedSamplePacket?>(
+                audioPrep.continuousPackets.size
+            ).apply {
+                for (pkt in audioPrep.continuousPackets) {
+                    if (pkt.localPtsUs in 0L..maxAllowedAudioPtsUs) {
+                        add(pkt)
+                    }
+                }
+            }
+            var nextAudioPacketIndex = 0
+
             // Initialize Sequential Hardware Video Frame Decoder (decodes every frame in order into 1 reusable Bitmap)
             sequentialDecoder = SequentialVideoFrameDecoder(
                 videoPath = metadata.localFilePath,
@@ -391,30 +430,22 @@ class VideoRenderingEngine(
                 }
             }
 
-            // Configure single continuous hardware H.264 encoder with ZERO B-frames (eliminates PTS/DTS reordering jitter!)
-            val activeEncoder = createHardwareAvcEncoder()
-            encoder = activeEncoder
-            val videoFormat = buildSmoothAvcFormat(
+            // Configure continuous H.264 encoder: prefers hardware MediaCodec, safe software fallback
+            val configuredEncoder = createAndStartAvcEncoderWithFallback(
                 width = outWidth,
                 height = outHeight,
                 fps = targetCfrFps,
                 bitrateBps = targetBitrateBps
             )
-            try {
-                activeEncoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            } catch (_: Exception) {
-                // Fallback without explicit profile if a device codec rejects profile key
-                val basicFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, outWidth, outHeight).apply {
-                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                    setInteger(MediaFormat.KEY_BIT_RATE, targetBitrateBps)
-                    setInteger(MediaFormat.KEY_FRAME_RATE, targetCfrFps)
-                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, H264_KEYFRAME_INTERVAL_SEC)
-                }
-                activeEncoder.configure(basicFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            }
-            val activeSurface = activeEncoder.createInputSurface()
+            val activeEncoder = configuredEncoder.codec
+            val activeSurface = configuredEncoder.inputSurface
+            encoder = activeEncoder
             inputSurface = activeSurface
-            activeEncoder.start()
+
+            val activeMuxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            muxer = activeMuxer
+            var videoTrackIndex = -1
+            var audioTrackIndex = -1
 
             val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
             val hudBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -431,60 +462,150 @@ class VideoRenderingEngine(
                 textSize = max(20f, outWidth * 0.032f)
                 isFakeBoldText = true
             }
+            val badgeRect = RectF(24f, 24f, outWidth - 24f, 92f)
             val matrix = Matrix()
             val bufferInfo = MediaCodec.BufferInfo()
+            val muxerWriteInfo = MediaCodec.BufferInfo()
 
-            val continuousVideoPackets = ArrayList<EncodedSamplePacket>(totalExpectedFrames)
+            // Only store lightweight Long timestamps for validation (never hold all video frames in RAM!)
+            val recordedVideoPtsUs = ArrayList<Long>(totalExpectedFrames)
+            val recordedAudioPtsUs = ArrayList<Long>(synchronizedAudioPackets.size)
+            val pendingPreMuxerVideoPackets = ArrayList<EncodedSamplePacket>(2)
             val submittedContinuousPtsQueue = ArrayDeque<Long>(16)
-            var outVideoFormat: MediaFormat? = null
             var lastAssignedVideoPtsUs = -frameDurationUs
+            var firstVideoPtsOffsetUs = -1L
+
+            fun writeAudioPacketsUpTo(maxPtsUs: Long, flushAllRemaining: Boolean) {
+                if (!muxerStarted || audioTrackIndex < 0) return
+                while (nextAudioPacketIndex < synchronizedAudioPackets.size) {
+                    val pkt = synchronizedAudioPackets[nextAudioPacketIndex]
+                    if (pkt == null) {
+                        nextAudioPacketIndex++
+                        continue
+                    }
+                    if (!flushAllRemaining && pkt.localPtsUs > maxPtsUs) {
+                        break
+                    }
+                    val isLastAudio = (nextAudioPacketIndex == synchronizedAudioPackets.size - 1)
+                    val flags = if (isLastAudio && flushAllRemaining) {
+                        pkt.flags or MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                    } else {
+                        pkt.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv()
+                    }
+                    val safePts = pkt.localPtsUs.coerceAtLeast(0L)
+                    val bb = ByteBuffer.wrap(pkt.bytes)
+                    muxerWriteInfo.set(0, pkt.bytes.size, safePts, flags)
+                    activeMuxer.writeSampleData(audioTrackIndex, bb, muxerWriteInfo)
+                    recordedAudioPtsUs.add(safePts)
+                    // Free packet byte array reference immediately so RAM stays low
+                    synchronizedAudioPackets[nextAudioPacketIndex] = null
+                    nextAudioPacketIndex++
+                }
+            }
+
+            fun startMuxerWithVideoFormat(videoFormat: MediaFormat) {
+                if (muxerStarted) return
+                videoTrackIndex = activeMuxer.addTrack(videoFormat)
+                audioTrackIndex = if (audioPrep.audioFormat != null && synchronizedAudioPackets.isNotEmpty()) {
+                    try {
+                        activeMuxer.addTrack(audioPrep.audioFormat)
+                    } catch (_: Exception) {
+                        -1
+                    }
+                } else -1
+                activeMuxer.start()
+                muxerStarted = true
+
+                // Flush any video packets that arrived before INFO_OUTPUT_FORMAT_CHANGED
+                if (pendingPreMuxerVideoPackets.isNotEmpty()) {
+                    for (pkt in pendingPreMuxerVideoPackets) {
+                        writeAudioPacketsUpTo(pkt.localPtsUs, flushAllRemaining = false)
+                        val bb = ByteBuffer.wrap(pkt.bytes)
+                        muxerWriteInfo.set(
+                            0,
+                            pkt.bytes.size,
+                            pkt.localPtsUs,
+                            pkt.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv()
+                        )
+                        activeMuxer.writeSampleData(videoTrackIndex, bb, muxerWriteInfo)
+                        recordedVideoPtsUs.add(pkt.localPtsUs)
+                    }
+                    pendingPreMuxerVideoPackets.clear()
+                }
+            }
 
             fun drainContinuousEncoder(endOfStream: Boolean) {
                 if (endOfStream) {
                     activeEncoder.signalEndOfInputStream()
                 }
                 var loops = 0
-                val maxLoops = if (endOfStream) 250 else 40
+                val maxLoops = if (endOfStream) 300 else 32
                 while (loops < maxLoops) {
+                    if (!endOfStream && submittedContinuousPtsQueue.isEmpty()) {
+                        break
+                    }
                     loops++
-                    // Backpressure: never let more than 2 frames sit un-drained in the Surface queue
+                    // Non-blocking poll (0us) when queue is shallow; short wait only under backpressure or EOS
                     val timeoutUs = when {
-                        endOfStream -> 10_000L
-                        submittedContinuousPtsQueue.size > 2 -> 12_000L
-                        else -> 1_500L
+                        endOfStream -> 6_000L
+                        submittedContinuousPtsQueue.size > 3 -> 4_000L
+                        else -> 0L
                     }
                     val outIndex = activeEncoder.dequeueOutputBuffer(bufferInfo, timeoutUs)
                     if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                        if (!endOfStream && submittedContinuousPtsQueue.size <= 2) break
+                        if (!endOfStream && submittedContinuousPtsQueue.size <= 3) break
                         if (endOfStream && submittedContinuousPtsQueue.isEmpty()) break
                     } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        outVideoFormat = activeEncoder.outputFormat
+                        startMuxerWithVideoFormat(activeEncoder.outputFormat)
                     } else if (outIndex >= 0) {
                         val encodedBuf = activeEncoder.getOutputBuffer(outIndex)
                         val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
                         if (encodedBuf != null && bufferInfo.size > 0 && !isConfig) {
-                            val bytes = ByteArray(bufferInfo.size)
-                            encodedBuf.position(bufferInfo.offset)
-                            encodedBuf.limit(bufferInfo.offset + bufferInfo.size)
-                            encodedBuf.get(bytes)
-
-                            // Assign exact 0-based continuous CFR timestamp (setpts=PTS-STARTPTS per segment + offset)
                             val queuedPts = submittedContinuousPtsQueue.pollFirst()
                                 ?: (lastAssignedVideoPtsUs + frameDurationUs)
-                            val normalizedPtsUs = if (continuousVideoPackets.isEmpty()) {
+
+                            val rawNormalizedPtsUs = if (recordedVideoPtsUs.isEmpty() && pendingPreMuxerVideoPackets.isEmpty()) {
+                                firstVideoPtsOffsetUs = queuedPts
                                 0L
                             } else {
-                                max(lastAssignedVideoPtsUs + (frameDurationUs / 2L).coerceAtLeast(1000L), queuedPts)
+                                val shifted = if (firstVideoPtsOffsetUs > 0L) {
+                                    (queuedPts - firstVideoPtsOffsetUs).coerceAtLeast(0L)
+                                } else {
+                                    queuedPts.coerceAtLeast(0L)
+                                }
+                                max(lastAssignedVideoPtsUs + (frameDurationUs / 2L).coerceAtLeast(1000L), shifted)
                             }
-                            lastAssignedVideoPtsUs = normalizedPtsUs
+                            lastAssignedVideoPtsUs = rawNormalizedPtsUs
 
-                            continuousVideoPackets.add(
-                                EncodedSamplePacket(
-                                    bytes = bytes,
-                                    localPtsUs = normalizedPtsUs,
-                                    flags = bufferInfo.flags
+                            if (muxerStarted && videoTrackIndex >= 0) {
+                                // Interleave audio packets up to this video frame's timestamp
+                                writeAudioPacketsUpTo(rawNormalizedPtsUs, flushAllRemaining = false)
+
+                                // Stream encoded video buffer directly into MediaMuxer (ZERO ByteArray copy!)
+                                encodedBuf.position(bufferInfo.offset)
+                                encodedBuf.limit(bufferInfo.offset + bufferInfo.size)
+                                val flags = if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0 && endOfStream) {
+                                    bufferInfo.flags
+                                } else {
+                                    bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv()
+                                }
+                                muxerWriteInfo.set(bufferInfo.offset, bufferInfo.size, rawNormalizedPtsUs, flags)
+                                activeMuxer.writeSampleData(videoTrackIndex, encodedBuf, muxerWriteInfo)
+                                recordedVideoPtsUs.add(rawNormalizedPtsUs)
+                            } else {
+                                // Fallback buffer only before format change (typically 0 frames for Surface encoders)
+                                val bytes = ByteArray(bufferInfo.size)
+                                encodedBuf.position(bufferInfo.offset)
+                                encodedBuf.limit(bufferInfo.offset + bufferInfo.size)
+                                encodedBuf.get(bytes)
+                                pendingPreMuxerVideoPackets.add(
+                                    EncodedSamplePacket(
+                                        bytes = bytes,
+                                        localPtsUs = rawNormalizedPtsUs,
+                                        flags = bufferInfo.flags
+                                    )
                                 )
-                            )
+                            }
                         }
                         activeEncoder.releaseOutputBuffer(outIndex, false)
                         if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
@@ -496,14 +617,17 @@ class VideoRenderingEngine(
 
             var segmentTimelineOffsetUs = 0L
             var globalFrameCount = 0
+            var lastReportedPct = 10
             var fallbackCachedBitmap: Bitmap? = null
             var fallbackCachedTimeUs = -1_000_000L
             val activeDecoder = sequentialDecoder
+            val codecLabel = if (configuredEncoder.isHardwareAccelerated) "HW" else "SW"
 
             for ((segIdx, segment) in segments.withIndex()) {
                 val segFrames = segmentFrameCounts[segIdx]
                 val segStartUs = segment.startMs * 1000L
                 val segEndUs = segment.endMs * 1000L
+                val singleSegmentList = listOf(segment)
 
                 if (decoderReady) {
                     activeDecoder.prepareForSegment(segStartUs)
@@ -516,9 +640,7 @@ class VideoRenderingEngine(
                     val localSegmentPtsUs = localFrameIdx * frameDurationUs
                     // Section 2: Place sequentially onto continuous timeline starting at 00:00:00.000
                     val continuousPtsUs = segmentTimelineOffsetUs + localSegmentPtsUs
-
                     val targetSourceUs = (segStartUs + localSegmentPtsUs).coerceAtMost(segEndUs)
-                    val targetSourceMs = targetSourceUs / 1000L
 
                     val sourceBitmap: Bitmap? = if (decoderReady) {
                         activeDecoder.decodeFrameForTimestamp(
@@ -539,7 +661,7 @@ class VideoRenderingEngine(
                     }
 
                     val transform = keyframeEngine.evaluateTransformAtUs(
-                        segments = listOf(segment),
+                        segments = singleSegmentList,
                         positionUs = targetSourceUs,
                         easingType = config.easingType
                     )
@@ -578,7 +700,6 @@ class VideoRenderingEngine(
                             }
 
                             if (config.burnHudTelemetryOnExport) {
-                                val badgeRect = RectF(24f, 24f, outWidth - 24f, 92f)
                                 canvas.drawRoundRect(badgeRect, 14f, 14f, hudBgPaint)
                                 canvas.drawRoundRect(badgeRect, 14f, 14f, hudBorderPaint)
                                 val dirArrow = if (segment.cameraDirection == CameraDirection.RIGHT) "→ RIGHT" else "← LEFT"
@@ -600,21 +721,24 @@ class VideoRenderingEngine(
                     drainContinuousEncoder(endOfStream = false)
                     globalFrameCount++
 
-                    if (globalFrameCount % 5 == 0 || globalFrameCount == totalExpectedFrames) {
+                    if (globalFrameCount % 8 == 0 || globalFrameCount == totalExpectedFrames) {
                         val fraction = (globalFrameCount.toFloat() / totalExpectedFrames.toFloat()).coerceIn(0f, 1f)
-                        val overallPct = 22 + (fraction * 68f).roundToInt()
-                        val elapsedSec = ((System.currentTimeMillis() - startTimeWallMs) / 1000f).coerceAtLeast(0.5f)
-                        val rate = globalFrameCount / elapsedSec
-                        val remainingFrames = (totalExpectedFrames - globalFrameCount).coerceAtLeast(0)
-                        val eta = (remainingFrames / rate.coerceAtLeast(1f)).roundToInt().coerceAtLeast(1)
+                        val overallPct = (16 + (fraction * 76f).roundToInt()).coerceIn(16, 92)
+                        if (overallPct != lastReportedPct || globalFrameCount == totalExpectedFrames) {
+                            lastReportedPct = overallPct
+                            val elapsedSec = ((System.currentTimeMillis() - startTimeWallMs) / 1000f).coerceAtLeast(0.25f)
+                            val rate = globalFrameCount / elapsedSec
+                            val remainingFrames = (totalExpectedFrames - globalFrameCount).coerceAtLeast(0)
+                            val eta = (remainingFrames / rate.coerceAtLeast(1f)).roundToInt().coerceAtLeast(1)
 
-                        onProgress(
-                            overallPct.coerceIn(22, 90),
-                            "Encoding Segment ${segIdx + 1}/${segments.size} @ ${targetCfrFps}fps (${segment.cameraDirection.badgeText} · ${String.format(Locale.US, "%.2fx", transform.zoom)})...",
-                            globalFrameCount,
-                            totalExpectedFrames,
-                            eta
-                        )
+                            onProgress(
+                                overallPct,
+                                "Encoding ($codecLabel) Seg ${segIdx + 1}/${segments.size} @ ${targetCfrFps}fps (${segment.cameraDirection.badgeText} · ${String.format(Locale.US, "%.2fx", transform.zoom)})...",
+                                globalFrameCount,
+                                totalExpectedFrames,
+                                eta
+                            )
+                        }
                     }
                 }
 
@@ -623,6 +747,15 @@ class VideoRenderingEngine(
 
             drainContinuousEncoder(endOfStream = true)
 
+            if (!muxerStarted && pendingPreMuxerVideoPackets.isNotEmpty()) {
+                startMuxerWithVideoFormat(activeEncoder.outputFormat)
+            }
+
+            // Write any remaining synchronized audio packets within the video duration
+            val maxFinalAudioPtsUs = (recordedVideoPtsUs.lastOrNull() ?: 0L) + frameDurationUs
+            writeAudioPacketsUpTo(maxFinalAudioPtsUs, flushAllRemaining = true)
+            synchronizedAudioPackets.clear()
+
             fallbackCachedBitmap?.recycle()
             fallbackCachedBitmap = null
             sequentialDecoder.release()
@@ -630,65 +763,27 @@ class VideoRenderingEngine(
             fallbackRetriever?.release()
             fallbackRetriever = null
 
-            val finalVideoFormat = outVideoFormat
-                ?: throw IllegalStateException("Hardware H.264 encoder did not emit output format.")
-            if (continuousVideoPackets.isEmpty()) {
-                throw IllegalStateException("Hardware H.264 encoder produced 0 video packets.")
-            }
-
-            // Ensure first video packet starts at 00:00:00.000 (0L us)
-            if (continuousVideoPackets.first().localPtsUs != 0L) {
-                val shift = continuousVideoPackets.first().localPtsUs
-                for (i in continuousVideoPackets.indices) {
-                    val pkt = continuousVideoPackets[i]
-                    continuousVideoPackets[i] = pkt.copy(localPtsUs = (pkt.localPtsUs - shift).coerceAtLeast(0L))
-                }
-            }
-
-            // Clamp audio packets so audio never continues past the last video frame
-            val maxAllowedAudioPtsUs = continuousVideoPackets.last().localPtsUs + frameDurationUs
-            val synchronizedAudioPackets = audioPrep.continuousPackets.filter {
-                it.localPtsUs in 0L..maxAllowedAudioPtsUs
+            if (!muxerStarted || recordedVideoPtsUs.isEmpty()) {
+                throw IllegalStateException("Video encoder produced 0 muxed frames.")
             }
 
             onProgress(
-                92,
-                "Muxing interleaved H.264 + AAC MP4 container...",
+                94,
+                "Finalizing MP4 container...",
                 totalExpectedFrames,
                 totalExpectedFrames,
                 1
             )
 
-            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val vTrackIndex = muxer.addTrack(finalVideoFormat)
-            val aTrackIndex = if (audioPrep.audioFormat != null && synchronizedAudioPackets.isNotEmpty()) {
-                try {
-                    muxer.addTrack(audioPrep.audioFormat)
-                } catch (_: Exception) {
-                    -1
-                }
-            } else -1
-
-            muxer.start()
-            muxerStarted = true
-
-            writeInterleavedPacketsToMuxer(
-                muxer = muxer,
-                videoTrackIndex = vTrackIndex,
-                audioTrackIndex = aTrackIndex,
-                videoPackets = continuousVideoPackets,
-                audioPackets = if (aTrackIndex >= 0) synchronizedAudioPackets else emptyList()
-            )
-
-            muxer.stop()
+            activeMuxer.stop()
             muxerStarted = false
-            muxer.release()
+            activeMuxer.release()
             muxer = null
 
-            encoder.stop()
-            encoder.release()
+            activeEncoder.stop()
+            activeEncoder.release()
             encoder = null
-            inputSurface.release()
+            activeSurface.release()
             inputSurface = null
 
             // Validate the exported MP4 (Section 8 & 10)
@@ -706,7 +801,7 @@ class VideoRenderingEngine(
                 expectedWidth = outWidth,
                 expectedHeight = outHeight,
                 expectedFps = targetCfrFps,
-                expectAudio = aTrackIndex >= 0
+                expectAudio = audioTrackIndex >= 0
             )
 
             if (!validation.isValid) {
@@ -753,43 +848,84 @@ class VideoRenderingEngine(
     }
 
     /**
-     * Selects a hardware-accelerated H.264 encoder when available, falling back to default AVC encoder.
+     * Prefers hardware-accelerated H.264 MediaCodec encoders and provides a safe software-encoding
+     * fallback if hardware encoding is unavailable or rejects the target format.
      */
-    private fun createHardwareAvcEncoder(): MediaCodec {
+    private fun createAndStartAvcEncoderWithFallback(
+        width: Int,
+        height: Int,
+        fps: Int,
+        bitrateBps: Int
+    ): ConfiguredVideoEncoder {
+        val candidateCodecs = mutableListOf<Pair<String?, Boolean>>()
         try {
-            val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-            val hardwareCodecName = codecList.codecInfos
-                .firstOrNull { info ->
-                    if (!info.isEncoder) return@firstOrNull false
-                    val supportsAvc = info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true) }
-                    if (!supportsAvc) return@firstOrNull false
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        info.isHardwareAccelerated && !info.isSoftwareOnly
-                    } else {
-                        val lower = info.name.lowercase(Locale.US)
-                        !lower.startsWith("omx.google.") && !lower.startsWith("c2.android.")
-                    }
-                }?.name
-
-            if (hardwareCodecName != null) {
-                return MediaCodec.createByCodecName(hardwareCodecName)
+            val codecList = MediaCodecList(MediaCodecList.ALL_CODECS)
+            val avcEncoders = codecList.codecInfos.filter { info ->
+                info.isEncoder && info.supportedTypes.any {
+                    it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true)
+                }
+            }
+            // 1. Hardware-accelerated AVC encoders first
+            avcEncoders.filter { isHardwareCodecInfo(it) }.forEach { info ->
+                candidateCodecs.add(info.name to true)
+            }
+            // 2. Software AVC encoders as safe fallback
+            avcEncoders.filter { !isHardwareCodecInfo(it) }.forEach { info ->
+                candidateCodecs.add(info.name to false)
             }
         } catch (_: Exception) {
         }
-        return MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        // 3. Default platform AVC encoder fallback
+        candidateCodecs.add(null to false)
+
+        val formatVariants = listOf(
+            buildSmoothAvcFormat(width, height, fps, bitrateBps, includePerformanceHints = true),
+            buildSmoothAvcFormat(width, height, fps, bitrateBps, includePerformanceHints = false)
+        )
+
+        var lastError: Exception? = null
+        for ((codecName, isHw) in candidateCodecs) {
+            for (format in formatVariants) {
+                var codec: MediaCodec? = null
+                var surface: Surface? = null
+                try {
+                    codec = if (codecName != null) {
+                        MediaCodec.createByCodecName(codecName)
+                    } else {
+                        MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    }
+                    codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    surface = codec.createInputSurface()
+                    codec.start()
+                    return ConfiguredVideoEncoder(
+                        codec = codec,
+                        inputSurface = surface,
+                        isHardwareAccelerated = isHw
+                    )
+                } catch (e: Exception) {
+                    lastError = e
+                    try { surface?.release() } catch (_: Exception) {}
+                    try { codec?.release() } catch (_: Exception) {}
+                }
+            }
+        }
+
+        throw lastError ?: IllegalStateException("Unable to initialize hardware or software H.264 encoder.")
     }
 
     /**
-     * Builds an H.264 encoder format optimized for smooth playback:
+     * Builds an H.264 encoder format optimized for fast encoding and smooth playback:
      * - Zero B-frames (`KEY_MAX_B_FRAMES = 0` + `AVCProfileBaseline`) so PTS == DTS and frames never stutter.
      * - 2-second IDR keyframe interval (`KEY_I_FRAME_INTERVAL = 2`).
-     * - Constant Frame Rate matching source FPS.
+     * - High offline operating rate (`KEY_OPERATING_RATE = max(fps * 4, 120)`) and realtime priority (`KEY_PRIORITY = 0`)
+     *   so hardware MediaCodec encodes at maximum speed without throttling to 1x wall-clock FPS.
      */
     private fun buildSmoothAvcFormat(
         width: Int,
         height: Int,
         fps: Int,
-        bitrateBps: Int
+        bitrateBps: Int,
+        includePerformanceHints: Boolean
     ): MediaFormat {
         return MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(
@@ -799,23 +935,26 @@ class VideoRenderingEngine(
             setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, H264_KEYFRAME_INTERVAL_SEC)
-            setInteger(
-                MediaFormat.KEY_PROFILE,
-                MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
-            )
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+            if (includePerformanceHints) {
+                setInteger(
+                    MediaFormat.KEY_PROFILE,
+                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                )
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    setInteger(MediaFormat.KEY_OPERATING_RATE, max(fps * 4, 120))
+                    setInteger(MediaFormat.KEY_PRIORITY, 0)
+                }
             }
         }
     }
 
     /**
      * Sequential Hardware Video Frame Decoder (`MediaExtractor` + `MediaCodec`).
-     * Decodes consecutive source frames into a single pre-allocated reusable `Bitmap` and `IntArray`
-     * buffer without re-seeking from keyframe on every frame or allocating per-frame Bitmaps.
+     * Decodes consecutive source frames into a single pre-allocated reusable `Bitmap`, `IntArray`,
+     * and plane `ByteArray` buffers without per-frame allocations or unnecessary seeking.
      */
     private class SequentialVideoFrameDecoder(
         private val videoPath: String,
@@ -833,6 +972,9 @@ class VideoRenderingEngine(
 
         private var reusableBitmap: Bitmap? = null
         private var reusablePixels: IntArray? = null
+        private var reusableYBytes: ByteArray = ByteArray(0)
+        private var reusableUBytes: ByteArray = ByteArray(0)
+        private var reusableVBytes: ByteArray = ByteArray(0)
         private var uprightWidth: Int = 0
         private var uprightHeight: Int = 0
 
@@ -863,10 +1005,7 @@ class VideoRenderingEngine(
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
                 )
 
-                val dec = MediaCodec.createDecoderByType(mime)
-                dec.configure(vFormat, null, null, 0)
-                dec.start()
-
+                val dec = createPreferredDecoder(mime, vFormat)
                 extractor = ext
                 decoder = dec
                 videoTrackIndex = vTrack
@@ -875,6 +1014,40 @@ class VideoRenderingEngine(
                 release()
                 false
             }
+        }
+
+        private fun createPreferredDecoder(mime: String, baseFormat: MediaFormat): MediaCodec {
+            var hardwareDecoderName: String? = null
+            try {
+                val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+                hardwareDecoderName = codecList.codecInfos.firstOrNull { info ->
+                    !info.isEncoder &&
+                        info.supportedTypes.any { it.equals(mime, ignoreCase = true) } &&
+                        isHardwareCodecInfo(info)
+                }?.name
+            } catch (_: Exception) {
+            }
+
+            if (hardwareDecoderName != null) {
+                var hwCodec: MediaCodec? = null
+                try {
+                    hwCodec = MediaCodec.createByCodecName(hardwareDecoderName)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        baseFormat.setInteger(MediaFormat.KEY_OPERATING_RATE, 240)
+                        baseFormat.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                    }
+                    hwCodec.configure(baseFormat, null, null, 0)
+                    hwCodec.start()
+                    return hwCodec
+                } catch (_: Exception) {
+                    try { hwCodec?.release() } catch (_: Exception) {}
+                }
+            }
+
+            val fallbackDec = MediaCodec.createDecoderByType(mime)
+            fallbackDec.configure(baseFormat, null, null, 0)
+            fallbackDec.start()
+            return fallbackDec
         }
 
         fun prepareForSegment(segmentStartUs: Long) {
@@ -907,30 +1080,33 @@ class VideoRenderingEngine(
             }
 
             var safetySteps = 0
-            while (!outputEos && safetySteps < 180) {
+            while (!outputEos && safetySteps < 200) {
                 safetySteps++
 
-                if (!inputEos) {
-                    val inIdx = dec.dequeueInputBuffer(2_000L)
-                    if (inIdx >= 0) {
-                        val inBuf = dec.getInputBuffer(inIdx)
-                        if (inBuf != null) {
-                            val sampleSize = ext.readSampleData(inBuf, 0)
-                            if (sampleSize < 0) {
-                                dec.queueInputBuffer(
-                                    inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                                )
-                                inputEos = true
-                            } else {
-                                val sampleTimeUs = ext.sampleTime.coerceAtLeast(0L)
-                                dec.queueInputBuffer(inIdx, 0, sampleSize, sampleTimeUs, 0)
-                                ext.advance()
-                            }
+                // Feed available input buffers without blocking (0us timeout) to keep hardware pipeline full
+                var fedCount = 0
+                while (!inputEos && fedCount < 4) {
+                    val inIdx = dec.dequeueInputBuffer(0L)
+                    if (inIdx < 0) break
+                    val inBuf = dec.getInputBuffer(inIdx)
+                    if (inBuf != null) {
+                        val sampleSize = ext.readSampleData(inBuf, 0)
+                        if (sampleSize < 0) {
+                            dec.queueInputBuffer(
+                                inIdx, 0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            )
+                            inputEos = true
+                        } else {
+                            val sampleTimeUs = ext.sampleTime.coerceAtLeast(0L)
+                            dec.queueInputBuffer(inIdx, 0, sampleSize, sampleTimeUs, 0)
+                            ext.advance()
                         }
                     }
+                    fedCount++
                 }
 
-                val outIdx = dec.dequeueOutputBuffer(bufferInfo, 3_500L)
+                val outTimeoutUs = if (safetySteps == 1) 500L else 2_000L
+                val outIdx = dec.dequeueOutputBuffer(bufferInfo, outTimeoutUs)
                 if (outIdx >= 0) {
                     val framePtsUs = bufferInfo.presentationTimeUs
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
@@ -1011,9 +1187,29 @@ class VideoRenderingEngine(
             val vRowStride = planes[2].rowStride
             val vPixelStride = planes[2].pixelStride
 
-            val yLimit = yBuffer.limit()
-            val uLimit = uBuffer.limit()
-            val vLimit = vBuffer.limit()
+            val yLimit = yBuffer.remaining()
+            val uLimit = uBuffer.remaining()
+            val vLimit = vBuffer.remaining()
+
+            if (reusableYBytes.size < yLimit) reusableYBytes = ByteArray(yLimit)
+            if (reusableUBytes.size < uLimit) reusableUBytes = ByteArray(uLimit)
+            if (reusableVBytes.size < vLimit) reusableVBytes = ByteArray(vLimit)
+
+            yBuffer.get(reusableYBytes, 0, yLimit)
+            uBuffer.get(reusableUBytes, 0, uLimit)
+            vBuffer.get(reusableVBytes, 0, vLimit)
+
+            val yBytes = reusableYBytes
+            val uBytes = reusableUBytes
+            val vBytes = reusableVBytes
+
+            // Hoist rotation stride math outside the inner pixel loop
+            val dstStep = when (rot) {
+                90 -> dstW
+                180 -> -1
+                270 -> -dstW
+                else -> 1
+            }
 
             for (sy in 0 until sampledH) {
                 val srcY = offsetY + sy * step
@@ -1022,38 +1218,47 @@ class VideoRenderingEngine(
                 val uRowOffset = uvY * uRowStride
                 val vRowOffset = uvY * vRowStride
 
+                var dstIdx = when (rot) {
+                    90 -> sampledH - 1 - sy
+                    180 -> (sampledH - 1 - sy) * dstW + (sampledW - 1)
+                    270 -> (sampledW - 1) * dstW + sy
+                    else -> sy * dstW
+                }
+
+                var lastUvX = -1
+                var cR = 0
+                var cG = 0
+                var cB = 0
+
                 for (sx in 0 until sampledW) {
                     val srcX = offsetX + sx * step
                     val yIdx = yRowOffset + srcX * yPixelStride
                     val uvX = srcX shr 1
-                    val uIdx = uRowOffset + uvX * uPixelStride
-                    val vIdx = vRowOffset + uvX * vPixelStride
 
-                    val yVal = if (yIdx in 0 until yLimit) (yBuffer.get(yIdx).toInt() and 0xFF) else 16
-                    val uVal = if (uIdx in 0 until uLimit) (uBuffer.get(uIdx).toInt() and 0xFF) - 128 else 0
-                    val vVal = if (vIdx in 0 until vLimit) (vBuffer.get(vIdx).toInt() and 0xFF) - 128 else 0
+                    if (uvX != lastUvX) {
+                        lastUvX = uvX
+                        val uIdx = uRowOffset + uvX * uPixelStride
+                        val vIdx = vRowOffset + uvX * vPixelStride
+                        val uVal = if (uIdx in 0 until uLimit) (uBytes[uIdx].toInt() and 0xFF) - 128 else 0
+                        val vVal = if (vIdx in 0 until vLimit) (vBytes[vIdx].toInt() and 0xFF) - 128 else 0
+                        cR = 1634 * vVal
+                        cG = -833 * vVal - 400 * uVal
+                        cB = 2066 * uVal
+                    }
 
-                    // Fast BT.601 integer YUV -> RGB
+                    val yVal = if (yIdx in 0 until yLimit) (yBytes[yIdx].toInt() and 0xFF) else 16
                     val y1192 = 1192 * (yVal - 16).coerceAtLeast(0)
-                    var r = (y1192 + 1634 * vVal) shr 10
-                    var g = (y1192 - 833 * vVal - 400 * uVal) shr 10
-                    var b = (y1192 + 2066 * uVal) shr 10
+
+                    var r = (y1192 + cR) shr 10
+                    var g = (y1192 + cG) shr 10
+                    var b = (y1192 + cB) shr 10
 
                     if (r < 0) r = 0 else if (r > 255) r = 255
                     if (g < 0) g = 0 else if (g > 255) g = 255
                     if (b < 0) b = 0 else if (b > 255) b = 255
 
-                    val argb = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-
-                    val dstIdx = when (rot) {
-                        90 -> sx * dstW + (sampledH - 1 - sy)
-                        180 -> (sampledH - 1 - sy) * dstW + (sampledW - 1 - sx)
-                        270 -> (sampledW - 1 - sx) * dstW + sy
-                        else -> sy * dstW + sx
-                    }
-                    if (dstIdx in pixels.indices) {
-                        pixels[dstIdx] = argb
-                    }
+                    pixels[dstIdx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+                    dstIdx += dstStep
                 }
             }
 
@@ -1068,6 +1273,9 @@ class VideoRenderingEngine(
             extractor = null
             reusableBitmap = null
             reusablePixels = null
+            reusableYBytes = ByteArray(0)
+            reusableUBytes = ByteArray(0)
+            reusableVBytes = ByteArray(0)
         }
     }
 
@@ -1112,8 +1320,8 @@ class VideoRenderingEngine(
             val mime = srcFormat.getString(MediaFormat.KEY_MIME) ?: ""
 
             if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
-                val buf = ByteBuffer.allocateDirect(256 * 1024)
-                val allContinuousPackets = mutableListOf<EncodedSamplePacket>()
+                val buf = ByteBuffer.allocateDirect(128 * 1024)
+                val allContinuousPackets = ArrayList<EncodedSamplePacket>()
                 var segmentTimelineOffsetUs = 0L
                 var lastGlobalAudioPtsUs = -1L
 
@@ -1123,52 +1331,61 @@ class VideoRenderingEngine(
                     val segEndUs = seg.endMs * 1000L
                     val segTargetDurationUs = segmentFrameCounts[segIdx] * frameDurationUs
 
-                    extractor.seekTo(segStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                    // Avoid unnecessary seek if extractor is already positioned right at segStartUs
+                    val curExtractorTime = extractor.sampleTime
+                    if (curExtractorTime < 0L ||
+                        curExtractorTime > segStartUs + 30_000L ||
+                        curExtractorTime < segStartUs - 250_000L
+                    ) {
+                        extractor.seekTo(segStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                    }
                     var firstSampleInSegUs = -1L
                     var lastLocalPtsUs = -1L
 
                     while (true) {
-                        buf.clear()
-                        val sampleSize = extractor.readSampleData(buf, 0)
-                        if (sampleSize < 0) break
-
                         val sampleTimeUs = extractor.sampleTime
-                        if (sampleTimeUs > segEndUs) break
+                        if (sampleTimeUs < 0L || sampleTimeUs > segEndUs) break
 
-                        if (sampleTimeUs >= segStartUs && sampleSize > 0) {
-                            if (firstSampleInSegUs < 0L) firstSampleInSegUs = sampleTimeUs
+                        if (sampleTimeUs >= segStartUs) {
+                            buf.clear()
+                            val sampleSize = extractor.readSampleData(buf, 0)
+                            if (sampleSize < 0) break
 
-                            // asetpts=PTS-STARTPTS: reset segment start to 0L
-                            val rawLocalUs = (sampleTimeUs - firstSampleInSegUs).coerceAtLeast(0L)
-                            val localPtsUs = if (lastLocalPtsUs < 0L) {
-                                0L
-                            } else {
-                                max(lastLocalPtsUs + 1000L, rawLocalUs)
-                            }
-                            if (localPtsUs >= segTargetDurationUs) break
+                            if (sampleSize > 0) {
+                                if (firstSampleInSegUs < 0L) firstSampleInSegUs = sampleTimeUs
 
-                            val continuousAudioPtsUs = if (allContinuousPackets.isEmpty()) {
-                                0L
-                            } else {
-                                max(lastGlobalAudioPtsUs + 1000L, segmentTimelineOffsetUs + localPtsUs)
-                            }
+                                // asetpts=PTS-STARTPTS: reset segment start to 0L
+                                val rawLocalUs = (sampleTimeUs - firstSampleInSegUs).coerceAtLeast(0L)
+                                val localPtsUs = if (lastLocalPtsUs < 0L) {
+                                    0L
+                                } else {
+                                    max(lastLocalPtsUs + 1000L, rawLocalUs)
+                                }
+                                if (localPtsUs >= segTargetDurationUs) break
 
-                            val bytes = ByteArray(sampleSize)
-                            buf.position(0)
-                            buf.limit(sampleSize)
-                            buf.get(bytes)
+                                val continuousAudioPtsUs = if (allContinuousPackets.isEmpty()) {
+                                    0L
+                                } else {
+                                    max(lastGlobalAudioPtsUs + 1000L, segmentTimelineOffsetUs + localPtsUs)
+                                }
 
-                            allContinuousPackets.add(
-                                EncodedSamplePacket(
-                                    bytes = bytes,
-                                    localPtsUs = continuousAudioPtsUs,
-                                    flags = extractor.sampleFlags
+                                val bytes = ByteArray(sampleSize)
+                                buf.position(0)
+                                buf.limit(sampleSize)
+                                buf.get(bytes)
+
+                                allContinuousPackets.add(
+                                    EncodedSamplePacket(
+                                        bytes = bytes,
+                                        localPtsUs = continuousAudioPtsUs,
+                                        flags = extractor.sampleFlags
+                                    )
                                 )
-                            )
-                            lastLocalPtsUs = localPtsUs
-                            lastGlobalAudioPtsUs = continuousAudioPtsUs
+                                lastLocalPtsUs = localPtsUs
+                                lastGlobalAudioPtsUs = continuousAudioPtsUs
+                            }
                         }
-                        extractor.advance()
+                        if (!extractor.advance()) break
                     }
                     segmentTimelineOffsetUs += segTargetDurationUs
                 }
@@ -1228,7 +1445,7 @@ class VideoRenderingEngine(
             encoder.start()
 
             var outAacFormat: MediaFormat? = null
-            val allContinuousPackets = mutableListOf<EncodedSamplePacket>()
+            val allContinuousPackets = ArrayList<EncodedSamplePacket>()
             val decInfo = MediaCodec.BufferInfo()
             val encInfo = MediaCodec.BufferInfo()
 
@@ -1251,7 +1468,7 @@ class VideoRenderingEngine(
 
                 while (!decodeDone) {
                     if (!inputDone) {
-                        val inIdx = decoder.dequeueInputBuffer(2000L)
+                        val inIdx = decoder.dequeueInputBuffer(500L)
                         if (inIdx >= 0) {
                             val inBuf = decoder.getInputBuffer(inIdx)
                             if (inBuf != null) {
@@ -1270,11 +1487,11 @@ class VideoRenderingEngine(
                         }
                     }
 
-                    val outIdx = decoder.dequeueOutputBuffer(decInfo, 2000L)
+                    val outIdx = decoder.dequeueOutputBuffer(decInfo, 1000L)
                     if (outIdx >= 0) {
                         val decBuf = decoder.getOutputBuffer(outIdx)
                         if (decBuf != null && decInfo.size > 0 && decInfo.presentationTimeUs >= segStartUs) {
-                            val encInIdx = encoder.dequeueInputBuffer(2000L)
+                            val encInIdx = encoder.dequeueInputBuffer(1000L)
                             if (encInIdx >= 0) {
                                 val encInBuf = encoder.getInputBuffer(encInIdx)
                                 if (encInBuf != null) {
@@ -1300,7 +1517,7 @@ class VideoRenderingEngine(
                     }
 
                     while (true) {
-                        val encOutIdx = encoder.dequeueOutputBuffer(encInfo, 1000L)
+                        val encOutIdx = encoder.dequeueOutputBuffer(encInfo, 0L)
                         if (encOutIdx == MediaCodec.INFO_TRY_AGAIN_LATER) break
                         if (encOutIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                             outAacFormat = encoder.outputFormat
@@ -1335,53 +1552,6 @@ class VideoRenderingEngine(
         } finally {
             try { decoder?.stop(); decoder?.release() } catch (_: Exception) {}
             try { encoder?.stop(); encoder?.release() } catch (_: Exception) {}
-        }
-    }
-
-    /**
-     * Writes video and audio packets interleaved in ascending timestamp order.
-     */
-    private fun writeInterleavedPacketsToMuxer(
-        muxer: MediaMuxer,
-        videoTrackIndex: Int,
-        audioTrackIndex: Int,
-        videoPackets: List<EncodedSamplePacket>,
-        audioPackets: List<EncodedSamplePacket>
-    ) {
-        val info = MediaCodec.BufferInfo()
-        var vIdx = 0
-        var aIdx = 0
-
-        while (vIdx < videoPackets.size || aIdx < audioPackets.size) {
-            val writeVideoNext = when {
-                aIdx >= audioPackets.size -> true
-                vIdx >= videoPackets.size -> false
-                else -> videoPackets[vIdx].localPtsUs <= audioPackets[aIdx].localPtsUs
-            }
-
-            if (writeVideoNext) {
-                val pkt = videoPackets[vIdx++]
-                val bb = ByteBuffer.wrap(pkt.bytes)
-                val flags = if (vIdx == videoPackets.size) {
-                    pkt.flags or MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                } else {
-                    pkt.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv()
-                }
-                info.set(0, pkt.bytes.size, pkt.localPtsUs.coerceAtLeast(0L), flags)
-                muxer.writeSampleData(videoTrackIndex, bb, info)
-            } else {
-                val pkt = audioPackets[aIdx++]
-                if (audioTrackIndex >= 0) {
-                    val bb = ByteBuffer.wrap(pkt.bytes)
-                    val flags = if (aIdx == audioPackets.size) {
-                        pkt.flags or MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                    } else {
-                        pkt.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM.inv()
-                    }
-                    info.set(0, pkt.bytes.size, pkt.localPtsUs.coerceAtLeast(0L), flags)
-                    muxer.writeSampleData(audioTrackIndex, bb, info)
-                }
-            }
         }
     }
 
@@ -1471,7 +1641,7 @@ class VideoRenderingEngine(
                 )
             }
 
-            val videoPtsList = mutableListOf<Long>()
+            val videoPtsList = ArrayList<Long>()
             extractor.selectTrack(vTrack)
             while (true) {
                 if (extractor.sampleTrackIndex < 0) break
@@ -1480,7 +1650,7 @@ class VideoRenderingEngine(
             }
             extractor.unselectTrack(vTrack)
 
-            val audioPtsList = mutableListOf<Long>()
+            val audioPtsList = ArrayList<Long>()
             if (aTrack >= 0) {
                 extractor.selectTrack(aTrack)
                 while (true) {

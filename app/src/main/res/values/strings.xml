@@ -10,6 +10,8 @@
     <string name="preview_auto_edit">PREVIEW AUTO EDIT</string>
     <string name="export_video">EXPORT VIDEO</string>
     <string name="video_exported_successfully">VIDEO EXPORTED SUCCESSFULLY</string>
+    <string name="export_complete_saved_to_gallery">Export complete! Video saved to Gallery ✅</string>
+    <string name="retry_save_to_gallery">RETRY SAVE TO GALLERY</string>
     <string name="open_video">OPEN VIDEO</string>
     <string name="edit_another_video">EDIT ANOTHER VIDEO</string>
     <string name="load_demo_video">GENERATE &amp; LOAD SAMPLE GAMING VIDEO</string>

@@ -234,6 +234,7 @@ fun ExportSuccessScreen(
     onCloseModalPlayer: () -> Unit,
     onEditAnotherVideoClick: () -> Unit,
     onBackToTimelineClick: () -> Unit,
+    onRetrySaveToGalleryClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler(onBack = onBackToTimelineClick)
@@ -245,6 +246,7 @@ fun ExportSuccessScreen(
     )
     val fileName = exportState.exportedFileName ?: "OMKAR_AUTOCUT_EXPORT.mp4"
     val filePath = exportState.exportedFilePath ?: ""
+    val saveError = exportState.gallerySaveError
 
     var previewPosMs by remember { mutableLongStateOf(0L) }
 
@@ -291,12 +293,57 @@ fun ExportSuccessScreen(
                 textAlign = TextAlign.Center
             )
 
-            Text(
-                text = "Saved to Android Gallery: Movies/OmkarAutoCut/$fileName",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-                textAlign = TextAlign.Center
-            )
+            if (exportState.isSavedToGallery && saveError == null) {
+                Text(
+                    text = stringResource(R.string.export_complete_saved_to_gallery),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = NeonEmerald,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.testTag("export_complete_gallery_status")
+                )
+                Text(
+                    text = "Saved to Android Gallery: Movies/OMKAR AUTOCUT/$fileName",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    textAlign = TextAlign.Center
+                )
+            } else if (saveError != null) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(ElevatedCardBg)
+                        .border(1.5.dp, KeyframeAmber, RoundedCornerShape(14.dp))
+                        .padding(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = saveError,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = KeyframeAmber,
+                        textAlign = TextAlign.Center
+                    )
+                    Button(
+                        onClick = onRetrySaveToGalleryClick,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = KeyframeAmber,
+                            contentColor = Color(0xFF040810)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("retry_save_gallery_button")
+                    ) {
+                        Text(
+                            text = stringResource(R.string.retry_save_to_gallery),
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
 
             // Live Rendered Video Preview Box
             if (filePath.isNotBlank()) {
@@ -342,7 +389,7 @@ fun ExportSuccessScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 ExportDetailRow(label = "OUTPUT FILE", value = fileName, valueColor = ElectricCyan)
-                ExportDetailRow(label = "GALLERY LOCATION", value = "Movies/OmkarAutoCut/", valueColor = NeonEmerald)
+                ExportDetailRow(label = "GALLERY LOCATION", value = "Movies/OMKAR AUTOCUT/", valueColor = NeonEmerald)
                 ExportDetailRow(label = "AUTO SPEECH CUTS", value = "$segmentCount Segments (Alt R/L)", valueColor = KeyframeAmber)
                 ExportDetailRow(label = "RENDERED SIZE", value = fileSizeMb, valueColor = TextPrimary)
             }

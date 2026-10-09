@@ -221,7 +221,13 @@ data class ExportProgressState(
     val exportedFilePath: String? = null,
     val exportedMediaStoreUri: String? = null,
     val exportedFileName: String? = null,
-    val exportedFileSizeBytes: Long = 0L
+    val exportedFileSizeBytes: Long = 0L,
+    val exportedDurationMs: Long = 0L,
+    val exportedWidth: Int = 0,
+    val exportedHeight: Int = 0,
+    val isSavedToGallery: Boolean = false,
+    val gallerySaveStatusText: String = "",
+    val gallerySaveError: String? = null
 )
 
 enum class ErrorKind {
