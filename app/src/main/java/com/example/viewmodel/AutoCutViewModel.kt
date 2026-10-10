@@ -452,6 +452,21 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
      * Evaluates the real-time camera transform for the current playback position.
      */
     fun getCurrentCameraTransform(): CameraTransform {
+        return evaluateCameraTransformAt(_uiState.value.currentPlaybackPositionMs)
+    }
+
+    /**
+     * Evaluates the camera transform at an explicit playback timestamp (ms).
+     */
+    fun evaluateCameraTransformAt(positionMs: Long): CameraTransform {
+        return evaluateCameraTransformAtUs(positionMs * 1000L)
+    }
+
+    /**
+     * Evaluates the camera transform at microsecond precision so the VSYNC preview clock
+     * and the CFR video export renderer use the exact same continuous interpolation.
+     */
+    fun evaluateCameraTransformAtUs(positionUs: Long): CameraTransform {
         val state = _uiState.value
         if (!state.previewAutoEditEnabled || state.segments.isEmpty()) {
             val activeSeg = state.segments.getOrNull(state.selectedSegmentIndex)
@@ -471,9 +486,9 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                 spokenPhrase = activeSeg?.spokenPhrase ?: ""
             )
         }
-        return keyframeEngine.evaluateTransformAt(
+        return keyframeEngine.evaluateTransformAtUs(
             segments = state.segments,
-            positionMs = state.currentPlaybackPositionMs,
+            positionUs = positionUs,
             easingType = configState.value.easingType
         )
     }
@@ -562,6 +577,7 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
     fun adjustSegmentSplitPosition(segmentId: Int, deltaStartMs: Long, deltaEndMs: Long) {
         val totalDuration = _uiState.value.importedVideo?.durationMs ?: return
         val minDur = 350L
+        val keepSafeZone = configState.value.keepSubjectInSafeZone
         val currentList = _uiState.value.segments.toMutableList()
         val idx = currentList.indexOfFirst { it.id == segmentId }
         if (idx < 0) return
@@ -575,9 +591,12 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
             val maxAllowedStart = seg.endMs - minDur
             newStart = (seg.startMs + deltaStartMs).coerceIn(minAllowedStart, maxAllowedStart)
             if (idx > 0 && currentList[idx - 1].endMs == seg.startMs) {
-                currentList[idx - 1] = currentList[idx - 1].copy(
-                    endMs = newStart,
-                    isModifiedManually = true
+                currentList[idx - 1] = keyframeEngine.rebuildSegmentKeyframes(
+                    segment = currentList[idx - 1].copy(
+                        endMs = newStart,
+                        isModifiedManually = true
+                    ),
+                    keepSubjectInSafeZone = keepSafeZone
                 )
             }
         }
@@ -591,17 +610,23 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
             }
             newEnd = (seg.endMs + deltaEndMs).coerceIn(minAllowedEnd, maxAllowedEnd)
             if (idx < currentList.size - 1 && currentList[idx + 1].startMs == seg.endMs) {
-                currentList[idx + 1] = currentList[idx + 1].copy(
-                    startMs = newEnd,
-                    isModifiedManually = true
+                currentList[idx + 1] = keyframeEngine.rebuildSegmentKeyframes(
+                    segment = currentList[idx + 1].copy(
+                        startMs = newEnd,
+                        isModifiedManually = true
+                    ),
+                    keepSubjectInSafeZone = keepSafeZone
                 )
             }
         }
 
-        currentList[idx] = seg.copy(
-            startMs = newStart,
-            endMs = newEnd,
-            isModifiedManually = true
+        currentList[idx] = keyframeEngine.rebuildSegmentKeyframes(
+            segment = seg.copy(
+                startMs = newStart,
+                endMs = newEnd,
+                isModifiedManually = true
+            ),
+            keepSubjectInSafeZone = keepSafeZone
         )
         commitUpdatedSegments(currentList)
     }

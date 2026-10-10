@@ -216,7 +216,10 @@ fun OmkarAutoCutApp(
                             previewAutoEditEnabled = uiState.previewAutoEditEnabled,
                             showTrackingHud = uiState.showTrackingHudOverlay,
                             evaluateTransform = { posMs ->
-                                viewModel.getCurrentCameraTransform()
+                                viewModel.evaluateCameraTransformAt(posMs)
+                            },
+                            evaluateTransformUs = { posUs ->
+                                viewModel.evaluateCameraTransformAtUs(posUs)
                             },
                             onPlayPauseToggle = { playing ->
                                 viewModel.setPlayingPreview(playing)

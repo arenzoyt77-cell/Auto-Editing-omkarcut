@@ -30,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -77,20 +78,39 @@ fun VideoPreviewPlayer(
     evaluateTransform: (Long) -> CameraTransform,
     onPositionChanged: (Long) -> Unit,
     onPlaybackEnded: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    evaluateTransformUs: ((Long) -> CameraTransform)? = null
 ) {
     var mediaPlayer by remember(videoFilePath) { mutableStateOf<MediaPlayer?>(null) }
     var isPlayerPrepared by remember(videoFilePath) { mutableStateOf(false) }
     var viewportSize by remember { mutableStateOf(IntSize(1, 1)) }
-    var liveTransform by remember {
-        mutableStateOf(evaluateTransform(seekToPositionMs))
-    }
 
     val currentSegments by rememberUpdatedState(segments)
     val currentAutoEdit by rememberUpdatedState(previewAutoEditEnabled)
     val currentEvaluate by rememberUpdatedState(evaluateTransform)
+    val currentEvaluateUs by rememberUpdatedState(evaluateTransformUs)
     val currentOnPositionChanged by rememberUpdatedState(onPositionChanged)
     val currentOnEnded by rememberUpdatedState(onPlaybackEnded)
+
+    fun evaluateAtUs(posUs: Long): CameraTransform {
+        val evalUs = currentEvaluateUs
+        return if (evalUs != null) {
+            evalUs(posUs)
+        } else {
+            currentEvaluate(posUs / 1000L)
+        }
+    }
+
+    var liveTransform by remember {
+        mutableStateOf(evaluateAtUs(seekToPositionMs * 1000L))
+    }
+
+    // Immediately reflect manual edits to segments, direction, zoom, tracking, or auto-edit toggle
+    LaunchedEffect(segments, previewAutoEditEnabled, seekToPositionMs) {
+        if (!isPlaying) {
+            liveTransform = evaluateAtUs(seekToPositionMs * 1000L)
+        }
+    }
 
     // Sync play/pause state with MediaPlayer
     LaunchedEffect(isPlaying, isPlayerPrepared) {
@@ -118,94 +138,91 @@ fun VideoPreviewPlayer(
                 } else {
                     mp.seekTo(seekToPositionMs.toInt())
                 }
-                liveTransform = currentEvaluate(seekToPositionMs)
+                liveTransform = evaluateAtUs(seekToPositionMs * 1000L)
             }
         } catch (_: Exception) {
         }
     }
 
-    // High-frequency 60fps smooth clock for live Keyframe zoom/pan interpolation & automatic cut skipping
+    // Display-VSYNC-locked microsecond clock for silky-smooth Keyframe zoom/pan interpolation & cut skipping
     LaunchedEffect(isPlaying, isPlayerPrepared, previewAutoEditEnabled) {
-        var lastAnchorMediaPosMs = -1L
-        var lastAnchorWallMs = android.os.SystemClock.elapsedRealtime()
-        var monotonicSmoothPosMs = -1L
+        var smoothPosUs = -1L
+        var lastFrameNanos = -1L
 
         while (isPlayerPrepared) {
+            val frameNanos = withFrameNanos { it }
             val mp = mediaPlayer
             if (mp != null) {
                 try {
-                    val rawMediaPosMs = mp.currentPosition.toLong()
-                    val nowWallMs = android.os.SystemClock.elapsedRealtime()
+                    val rawMediaPosMs = mp.currentPosition.toLong().coerceAtLeast(0L)
+                    val rawMediaPosUs = rawMediaPosMs * 1000L
 
-                    // Smooth out coarse MediaPlayer position polling steps using elapsed wall-clock delta
-                    // while preventing backward micro-steps during continuous playback
-                    val smoothPosMs = if (mp.isPlaying) {
-                        val predictedFromAnchor = if (lastAnchorMediaPosMs >= 0L) {
-                            lastAnchorMediaPosMs + (nowWallMs - lastAnchorWallMs)
+                    val deltaFrameUs = if (lastFrameNanos >= 0L) {
+                        ((frameNanos - lastFrameNanos) / 1000L).coerceIn(1_000L, 50_000L)
+                    } else {
+                        16_667L
+                    }
+                    lastFrameNanos = frameNanos
+
+                    // Phase-locked continuous microsecond clock: advances smoothly on every VSYNC frame
+                    // without freezing on coarse MediaPlayer audio buffer ticks or jumping backward.
+                    val currentSmoothUs = if (mp.isPlaying) {
+                        if (smoothPosUs < 0L || kotlin.math.abs(rawMediaPosUs - smoothPosUs) > 220_000L) {
+                            smoothPosUs = rawMediaPosUs
+                            rawMediaPosUs
                         } else {
-                            rawMediaPosMs
-                        }
-                        if (lastAnchorMediaPosMs < 0L || kotlin.math.abs(rawMediaPosMs - predictedFromAnchor) > 140L) {
-                            lastAnchorMediaPosMs = rawMediaPosMs
-                            lastAnchorWallMs = nowWallMs
-                            monotonicSmoothPosMs = rawMediaPosMs
-                            rawMediaPosMs
-                        } else {
-                            if (rawMediaPosMs > lastAnchorMediaPosMs) {
-                                lastAnchorMediaPosMs = rawMediaPosMs
-                                lastAnchorWallMs = nowWallMs
-                            }
-                            val interpolated = (lastAnchorMediaPosMs + (nowWallMs - lastAnchorWallMs))
-                                .coerceAtMost(rawMediaPosMs + 65L)
-                            monotonicSmoothPosMs = kotlin.math.max(monotonicSmoothPosMs, interpolated)
-                            monotonicSmoothPosMs
+                            val driftErrorUs = (rawMediaPosUs - smoothPosUs).toDouble()
+                            // Gentle PLL rate adjustment (±8% max) keeps smoothPosUs tightly locked to media clock
+                            val rateMultiplier = (1.0 + (driftErrorUs / 450_000.0)).coerceIn(0.92, 1.08)
+                            val stepUs = (deltaFrameUs * rateMultiplier).toLong().coerceAtLeast(1000L)
+                            smoothPosUs += stepUs
+                            smoothPosUs
                         }
                     } else {
-                        lastAnchorMediaPosMs = rawMediaPosMs
-                        lastAnchorWallMs = nowWallMs
-                        monotonicSmoothPosMs = rawMediaPosMs
-                        rawMediaPosMs
+                        smoothPosUs = rawMediaPosUs
+                        rawMediaPosUs
                     }
 
+                    val smoothPosMs = currentSmoothUs / 1000L
                     val segs = currentSegments
                     if (currentAutoEdit && segs.isNotEmpty() && mp.isPlaying) {
-                        val inAnySegment = segs.any { smoothPosMs in it.startMs..it.endMs }
+                        val inAnySegment = segs.any {
+                            currentSmoothUs >= it.startMs * 1000L && currentSmoothUs <= it.endMs * 1000L
+                        }
                         if (!inAnySegment) {
-                            val nextSeg = segs.firstOrNull { it.startMs > smoothPosMs }
+                            val nextSeg = segs.firstOrNull { it.startMs * 1000L > currentSmoothUs }
                             if (nextSeg != null) {
                                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                                     mp.seekTo(nextSeg.startMs, MediaPlayer.SEEK_CLOSEST)
                                 } else {
                                     mp.seekTo(nextSeg.startMs.toInt())
                                 }
-                                lastAnchorMediaPosMs = nextSeg.startMs
-                                lastAnchorWallMs = nowWallMs
-                                monotonicSmoothPosMs = nextSeg.startMs
+                                smoothPosUs = nextSeg.startMs * 1000L
                                 currentOnPositionChanged(nextSeg.startMs)
-                                liveTransform = currentEvaluate(nextSeg.startMs)
+                                liveTransform = evaluateAtUs(smoothPosUs)
                             } else {
                                 val firstSeg = segs.first()
                                 mp.seekTo(firstSeg.startMs.toInt())
-                                lastAnchorMediaPosMs = firstSeg.startMs
-                                lastAnchorWallMs = nowWallMs
-                                monotonicSmoothPosMs = firstSeg.startMs
+                                smoothPosUs = firstSeg.startMs * 1000L
                                 currentOnPositionChanged(firstSeg.startMs)
-                                liveTransform = currentEvaluate(firstSeg.startMs)
+                                liveTransform = evaluateAtUs(smoothPosUs)
                             }
                         } else {
                             currentOnPositionChanged(smoothPosMs)
-                            liveTransform = currentEvaluate(smoothPosMs)
+                            liveTransform = evaluateAtUs(currentSmoothUs)
                         }
                     } else {
                         if (mp.isPlaying) {
                             currentOnPositionChanged(smoothPosMs)
                         }
-                        liveTransform = currentEvaluate(smoothPosMs)
+                        liveTransform = evaluateAtUs(currentSmoothUs)
                     }
                 } catch (_: Exception) {
                 }
             }
-            delay(16L)
+            if (!isPlaying) {
+                delay(32L)
+            }
         }
     }
 

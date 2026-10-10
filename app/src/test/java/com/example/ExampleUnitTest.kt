@@ -183,6 +183,75 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun professionalSmoothLeftRightKeyframes_centeredLeftRightMovingSubjects_andPreviewExportParity() {
+        val engine = KeyframeEditingEngine()
+        val rawSegments = listOf(
+            // 1. Centered subject (RIGHT camera movement)
+            RawSpeechSegment(0L, 3000L, "Speaker 1 centered", 0.93f, -6f, SpeakerIdentity.MALE),
+            // 2. Left subject (LEFT camera movement)
+            RawSpeechSegment(3000L, 6000L, "Speaker 2 left", 0.92f, -6f, SpeakerIdentity.FEMALE),
+            // 3. Right subject (RIGHT camera movement)
+            RawSpeechSegment(6000L, 9000L, "Speaker 1 right", 0.94f, -5f, SpeakerIdentity.MALE),
+            // 4. Moving subject (LEFT camera movement)
+            RawSpeechSegment(9000L, 12500L, "Speaker 2 moving", 0.91f, -6f, SpeakerIdentity.FEMALE)
+        )
+        val subjects = listOf(
+            SubjectRegion(0.50f, 0.48f, 0.50f, 0.48f, 0.34f, 0.42f, 0.08f, 0.95f),
+            SubjectRegion(0.35f, 0.47f, 0.35f, 0.47f, 0.34f, 0.42f, 0.10f, 0.93f),
+            SubjectRegion(0.65f, 0.47f, 0.65f, 0.47f, 0.34f, 0.42f, 0.10f, 0.93f),
+            SubjectRegion(0.38f, 0.46f, 0.62f, 0.49f, 0.34f, 0.42f, 0.26f, 0.91f)
+        )
+
+        val timeline = engine.generateSegmentedTimeline(
+            rawSegments = rawSegments,
+            subjectRegions = subjects,
+            config = AutoCutConfig()
+        )
+
+        // Verify centered subject with RIGHT vs LEFT produces clean, distinct directional glide
+        val centeredRightPeak = engine.evaluateTransformAtUs(listOf(timeline[0]), timeline[0].zoomHoldEndTimeMs * 1000L)
+        assertTrue("Centered subject with RIGHT movement should glide right of 0.50", centeredRightPeak.focusX > 0.503f)
+
+        // Verify left subject (0.35) is smoothly framed on the left
+        val leftSubjectPeak = engine.evaluateTransformAtUs(listOf(timeline[1]), timeline[1].zoomHoldEndTimeMs * 1000L)
+        assertTrue("Left subject (0.35) should smoothly pan left of 0.50", leftSubjectPeak.focusX < 0.485f)
+
+        // Verify right subject (0.65) is smoothly framed on the right
+        val rightSubjectPeak = engine.evaluateTransformAtUs(listOf(timeline[2]), timeline[2].zoomHoldEndTimeMs * 1000L)
+        assertTrue("Right subject (0.65) should smoothly pan right of 0.50", rightSubjectPeak.focusX > 0.515f)
+
+        // Verify continuous 60fps smoothness across all 4 segments, including smooth zoom-out and boundary transitions
+        val step60FpsUs = 16_667L
+        for (seg in timeline) {
+            var prev = engine.evaluateTransformAtUs(timeline, seg.startMs * 1000L)
+            assertEquals(1.00f, prev.zoom, 0.002f)
+            assertEquals(0.50f, prev.focusX, 0.002f)
+
+            var tUs = seg.startMs * 1000L + step60FpsUs
+            var prevZoomOutScale = engine.evaluateTransformAtUs(timeline, seg.zoomHoldEndTimeMs * 1000L).zoom
+            while (tUs <= seg.endMs * 1000L) {
+                val curr = engine.evaluateTransformAtUs(timeline, tUs)
+                // Micro-step continuity at 60fps: never snaps or shakes
+                assertTrue("Smooth 60fps zoom step", abs(curr.zoom - prev.zoom) < 0.006f)
+                assertTrue("Smooth 60fps focusX step", abs(curr.focusX - prev.focusX) < 0.006f)
+                assertTrue("Smooth 60fps focusY step", abs(curr.focusY - prev.focusY) < 0.006f)
+
+                // During zoom-out phase, zoom scale must monotonically and smoothly decrease back to 1.00x
+                if (tUs > seg.zoomHoldEndTimeMs * 1000L) {
+                    assertTrue("Zoom-out must monotonically decrease without rebounds", curr.zoom <= prevZoomOutScale + 1e-5f)
+                    prevZoomOutScale = curr.zoom
+                }
+                prev = curr
+                tUs += step60FpsUs
+            }
+
+            val endAtBoundary = engine.evaluateTransformAtUs(timeline, seg.endMs * 1000L)
+            assertEquals("Segment end must smoothly return to 1.00x zoom", 1.00f, endAtBoundary.zoom, 0.002f)
+            assertEquals("Segment end must smoothly return to 0.50 focusX", 0.50f, endAtBoundary.focusX, 0.002f)
+        }
+    }
+
+    @Test
     fun exportResolutionAndBitrate_follow1080pDefault_noLowResUpscaling_andOptimalBitrate() {
         // Low-res 544x960 must NOT be upscaled
         val (lowW, lowH) = VideoRenderingEngine.computeSafeEncoderDimensions(544, 960, preferOriginal4k = false)

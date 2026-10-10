@@ -641,6 +641,11 @@ class VideoRenderingEngine(
                     // Section 2: Place sequentially onto continuous timeline starting at 00:00:00.000
                     val continuousPtsUs = segmentTimelineOffsetUs + localSegmentPtsUs
                     val targetSourceUs = (segStartUs + localSegmentPtsUs).coerceAtMost(segEndUs)
+                    val keyframeEvalUs = if (segFrames > 1) {
+                        segStartUs + ((segEndUs - segStartUs) * localFrameIdx.toLong()) / (segFrames - 1).toLong()
+                    } else {
+                        segStartUs
+                    }
 
                     val sourceBitmap: Bitmap? = if (decoderReady) {
                         activeDecoder.decodeFrameForTimestamp(
@@ -662,7 +667,7 @@ class VideoRenderingEngine(
 
                     val transform = keyframeEngine.evaluateTransformAtUs(
                         segments = singleSegmentList,
-                        positionUs = targetSourceUs,
+                        positionUs = keyframeEvalUs,
                         easingType = config.easingType
                     )
 

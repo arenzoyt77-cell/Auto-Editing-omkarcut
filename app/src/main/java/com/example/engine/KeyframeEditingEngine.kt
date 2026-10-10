@@ -93,26 +93,16 @@ class KeyframeEditingEngine {
             )
 
             // Peak Framing Keyframe (Keyframe B represents the target zoomed framing on the active speaker)
-            val maxPanAmplitude = ((1f - (1f / smartZoomPeak)) * 0.30f).coerceIn(0.012f, 0.055f)
-            val directionSign = when (direction) {
-                CameraDirection.RIGHT -> 1.0f
-                CameraDirection.LEFT -> -1.0f
-                CameraDirection.CENTER -> 0.0f
-            }
-
             val midSubjX = (subject.startCenterX + subject.endCenterX) * 0.5f
             val midSubjY = (subject.startCenterY + subject.endCenterY) * 0.5f
-            val desiredPeakFocusX = midSubjX + directionSign * maxPanAmplitude * 0.35f
-            val desiredPeakFocusY = midSubjY - 0.010f
-
-            val clampedPeakFocus = clampFocusToKeepSubjectVisible(
-                desiredFocusX = desiredPeakFocusX,
-                desiredFocusY = desiredPeakFocusY,
-                zoom = smartZoomPeak,
+            val clampedPeakFocus = computeSmoothPeakFocus(
                 subjectX = midSubjX,
                 subjectY = midSubjY,
                 subjectW = subject.widthRatio,
                 subjectH = subject.heightRatio,
+                direction = direction,
+                peakZoom = smartZoomPeak,
+                trackProgress = 0.5f,
                 enforceSafeZone = config.keepSubjectInSafeZone
             )
 
@@ -188,18 +178,19 @@ class KeyframeEditingEngine {
 
         // Off-center subjects take slightly longer to smoothly glide onto so motion never feels rushed
         val centerOffsetDist = abs(subject.startCenterX - 0.50f) + abs(subject.endCenterX - 0.50f)
-        val offsetAdjustment = (centerOffsetDist * 0.06f).coerceIn(0f, 0.04f)
+        val offsetAdjustment = (centerOffsetDist * 0.05f).coerceIn(0f, 0.04f)
 
         val peakStartNorm = when {
-            durationMs >= 3500L -> (0.30f + offsetAdjustment).coerceIn(0.28f, 0.36f)
-            durationMs >= 2000L -> (0.34f + offsetAdjustment).coerceIn(0.32f, 0.40f)
-            else -> 0.38f
+            durationMs >= 3500L -> (0.29f + offsetAdjustment).coerceIn(0.27f, 0.35f)
+            durationMs >= 2000L -> (0.32f + offsetAdjustment).coerceIn(0.30f, 0.38f)
+            else -> 0.35f
         }
 
+        // Generous zoom-out window (33%–38% of segment) so zoom-out is always gradual and unhurried
         val holdEndNorm = when {
-            durationMs >= 3500L -> 0.72f
-            durationMs >= 2000L -> 0.68f
-            else -> 0.64f
+            durationMs >= 3500L -> 0.67f
+            durationMs >= 2000L -> 0.65f
+            else -> 0.62f
         }
 
         val zoomStartTimeMs = startMs
@@ -221,7 +212,8 @@ class KeyframeEditingEngine {
     }
 
     /**
-     * Recalculates a single segment's keyframes when the user manually edits direction, zoom, or subject position.
+     * Recalculates a single segment's keyframes when the user manually edits direction, zoom,
+     * subject position, or split boundaries.
      */
     fun rebuildSegmentKeyframes(
         segment: VideoSegment,
@@ -243,13 +235,6 @@ class KeyframeEditingEngine {
         val safeStartZoom = newStartZoom.coerceIn(1.00f, 1.22f)
         val safePeakZoom = newPeakZoom.coerceIn(1.00f, 1.25f)
 
-        val panDelta = ((1f - (1f / max(safePeakZoom, 1.04f))) * 0.30f).coerceIn(0.012f, 0.055f)
-        val sign = when (newDirection) {
-            CameraDirection.RIGHT -> 1f
-            CameraDirection.LEFT -> -1f
-            CameraDirection.CENTER -> 0f
-        }
-
         val startFocus = clampFocusToKeepSubjectVisible(
             desiredFocusX = 0.50f,
             desiredFocusY = 0.50f,
@@ -263,20 +248,32 @@ class KeyframeEditingEngine {
 
         val midSubjX = (updatedSubject.startCenterX + updatedSubject.endCenterX) * 0.5f
         val midSubjY = (updatedSubject.startCenterY + updatedSubject.endCenterY) * 0.5f
-        val endFocus = clampFocusToKeepSubjectVisible(
-            desiredFocusX = midSubjX + sign * panDelta * 0.35f,
-            desiredFocusY = midSubjY - 0.010f,
-            zoom = safePeakZoom,
+        val endFocus = computeSmoothPeakFocus(
             subjectX = midSubjX,
             subjectY = midSubjY,
             subjectW = updatedSubject.widthRatio,
             subjectH = updatedSubject.heightRatio,
+            direction = newDirection,
+            peakZoom = safePeakZoom,
+            trackProgress = 0.5f,
             enforceSafeZone = keepSubjectInSafeZone
         )
 
         val durationMs = (segment.endMs - segment.startMs).coerceAtLeast(200L)
-        val peakTimeMs = segment.startMs + (durationMs * 0.34f).roundToLong()
-        val holdEndTimeMs = segment.startMs + (durationMs * 0.70f).roundToLong()
+        val peakStartNorm = when {
+            durationMs >= 3500L -> 0.31f
+            durationMs >= 2000L -> 0.33f
+            else -> 0.35f
+        }
+        val holdEndNorm = when {
+            durationMs >= 3500L -> 0.67f
+            durationMs >= 2000L -> 0.65f
+            else -> 0.62f
+        }
+        val peakTimeMs = (segment.startMs + (durationMs * peakStartNorm).roundToLong())
+            .coerceIn(segment.startMs + 80L, segment.endMs - 120L)
+        val holdEndTimeMs = (segment.startMs + (durationMs * holdEndNorm).roundToLong())
+            .coerceIn(peakTimeMs + 40L, segment.endMs - 80L)
 
         return segment.copy(
             subjectRegion = updatedSubject,
@@ -316,16 +313,16 @@ class KeyframeEditingEngine {
     }
 
     /**
-     * Microsecond-accurate camera transform evaluator used by both the 60fps preview clock and the
+     * Microsecond-accurate camera transform evaluator used by both the VSYNC preview clock and the
      * CFR video renderer so preview and exported video match with zero quantization stepping.
      *
      * Dynamic multi-keyframe zoom envelope over normalized segment time `t` in [0, 1]:
      * 1. [0.00 .. peakStartNorm] (`zoomStartTimeMs -> zoomPeakTimeMs`):
-     *    Smooth ease-in/ease-out zoom-in from `baseZoom` (1.00x) to `0.97` of `peakZoom` (1.08x–1.15x)
+     *    Smooth ease-in/ease-out zoom-in from `baseZoom` (1.00x) to `0.98` of `peakZoom` (1.08x–1.15x)
      * 2. [peakStartNorm .. holdEndNorm] (`zoomPeakTimeMs -> zoomHoldEndTimeMs`):
-     *    Hold zoomed framing / very slowly continue from `0.97` to `1.00` (`peakZoom`) while following subject
+     *    Hold zoomed framing / very slowly crest from `0.98` to `1.00` (`peakZoom`) while following subject
      * 3. [holdEndNorm .. 1.00] (`zoomHoldEndTimeMs -> zoomEndTimeMs`):
-     *    Smooth ease-in/ease-out zoom-out from `peakZoom` back toward `baseZoom` (1.00x) before segment ends.
+     *    Smooth, gradual ease-in/ease-out zoom-out from `peakZoom` back toward `baseZoom` (1.00x) before segment ends.
      */
     fun evaluateTransformAtUs(
         segments: List<VideoSegment>,
@@ -350,11 +347,11 @@ class KeyframeEditingEngine {
             )
         }
 
-        val positionMs = positionUs / 1000L
-        val activeSeg = segments.firstOrNull { positionMs in it.startMs..it.endMs }
-            ?: segments.minByOrNull {
-                min(abs(positionMs - it.startMs), abs(positionMs - it.endMs))
-            }!!
+        val activeSeg = segments.firstOrNull {
+            positionUs >= it.startMs * 1000L && positionUs <= it.endMs * 1000L
+        } ?: segments.minByOrNull {
+            min(abs(positionUs - it.startMs * 1000L), abs(positionUs - it.endMs * 1000L))
+        }!!
 
         val segStartUs = activeSeg.startMs * 1000L
         val segDurationUs = ((activeSeg.endMs - activeSeg.startMs) * 1000L).coerceAtLeast(100_000L)
@@ -367,23 +364,23 @@ class KeyframeEditingEngine {
             ((activeSeg.zoomPeakTimeMs - activeSeg.startMs).toFloat() / segDurationMs.toFloat())
                 .coerceIn(0.22f, 0.45f)
         } else {
-            0.34f
+            0.32f
         }
         val holdEndNorm = if (activeSeg.zoomHoldEndTimeMs > activeSeg.zoomPeakTimeMs && activeSeg.zoomHoldEndTimeMs < activeSeg.endMs) {
             ((activeSeg.zoomHoldEndTimeMs - activeSeg.startMs).toFloat() / segDurationMs.toFloat())
-                .coerceIn(peakStartNorm + 0.15f, 0.82f)
+                .coerceIn(peakStartNorm + 0.15f, 0.80f)
         } else {
-            0.70f
+            0.66f
         }
 
         val baseZoom = activeSeg.keyframeA.zoom.coerceIn(1.00f, 1.22f)
         val peakZoom = max(baseZoom, activeSeg.smartZoomPeak.coerceIn(1.00f, 1.25f))
 
-        // Compute dynamic 3-stage zoom envelope in [0f .. 1f] using ease-in/ease-out interpolation:
-        // Stage 1 (Start -> Peak): Smoothly increase from 0.0 -> 0.97
-        // Stage 2 (Peak -> HoldEnd): Hold / very slowly continue from 0.97 -> 1.00
-        // Stage 3 (HoldEnd -> End): Smoothly return from 1.00 -> 0.00 before segment ends
-        val holdEntryFraction = 0.97f
+        // Compute dynamic 3-stage zoom envelope in [0f .. 1f] using smooth ease-in/ease-out interpolation:
+        // Stage 1 (Start -> Peak): Smoothly increase from 0.0 -> 0.98
+        // Stage 2 (Peak -> HoldEnd): Hold / very slowly continue from 0.98 -> 1.00
+        // Stage 3 (HoldEnd -> End): Smoothly and gradually return from 1.00 -> 0.00 before segment ends
+        val holdEntryFraction = 0.98f
         val zoomEnvelope: Float = when {
             rawT <= peakStartNorm -> {
                 val localInT = (rawT / peakStartNorm.coerceAtLeast(0.05f)).coerceIn(0f, 1f)
@@ -403,38 +400,26 @@ class KeyframeEditingEngine {
 
         val currentZoom = lerp(baseZoom, peakZoom, zoomEnvelope)
 
-        // Smoothly follow the moving subject across the segment using ease-in/ease-out
+        // Smoothly follow the moving subject across the segment using continuous ease-in/ease-out
         val smoothTrackT = applyEasing(rawT, easingType)
         val (liveSubjX, liveSubjY) = activeSeg.subjectRegion.centerAt(smoothTrackT)
 
-        // Subtle directional pan (RIGHT or LEFT) centered around the active subject
-        val maxPanAmplitude = ((1f - (1f / max(peakZoom, 1.04f))) * 0.30f).coerceIn(0.012f, 0.055f)
-        val directionSign = when (activeSeg.cameraDirection) {
-            CameraDirection.RIGHT -> 1.0f
-            CameraDirection.LEFT -> -1.0f
-            CameraDirection.CENTER -> 0.0f
-        }
-
-        // Smoothly glide across the subject in the assigned camera direction while keeping subject centered
-        val directionalPanX = directionSign * maxPanAmplitude * (-0.35f + 0.70f * smoothTrackT)
-        val directionalPanY = -0.010f
-
-        // Clamp the peak target framing at `peakZoom` so the moving subject stays centered inside the safe zone
-        val clampedPeakTarget = clampFocusToKeepSubjectVisible(
-            desiredFocusX = liveSubjX + directionalPanX,
-            desiredFocusY = liveSubjY + directionalPanY,
-            zoom = max(peakZoom, 1.04f),
+        // Compute soft-saturated peak target focus that smoothly combines subject tracking and
+        // unidirectional LEFT/RIGHT camera movement without ever hitting a hard boundary kink
+        val clampedPeakTarget = computeSmoothPeakFocus(
             subjectX = liveSubjX,
             subjectY = liveSubjY,
             subjectW = activeSeg.subjectRegion.widthRatio,
             subjectH = activeSeg.subjectRegion.heightRatio,
+            direction = activeSeg.cameraDirection,
+            peakZoom = max(peakZoom, 1.04f),
+            trackProgress = smoothTrackT,
             enforceSafeZone = true
         )
 
-        // Scale the focus offset by the exact optical pan capacity ratio `(1 - 1/currentZoom) / (1 - 1/peakZoom)`.
-        // Because `currentZoom * (1 - 1/currentZoom) == currentZoom - 1`, this makes the screen-space pixel
-        // translation strictly proportional to `zoomEnvelope` AND guarantees the crop window never hits
-        // the frame edge clamp at any intermediate zoom level!
+        // Scale the focus offset by the optical pan capacity ratio `(1 - 1/currentZoom) / (1 - 1/peakZoom)`.
+        // Because `currentZoom * (1 - 1/currentZoom) == currentZoom - 1`, screen-space pixel translation
+        // is strictly proportional to `zoomEnvelope` and blends zoom-in, hold, and zoom-out seamlessly.
         val peakPanCapacity = 1.0f - (1.0f / max(peakZoom, 1.001f))
         val currentPanCapacity = 1.0f - (1.0f / max(currentZoom, 1.0001f))
         val panCapacityRatio = if (peakPanCapacity > 0.001f) {
@@ -443,8 +428,11 @@ class KeyframeEditingEngine {
             zoomEnvelope
         }
 
-        val rawFocusX = lerp(0.50f, clampedPeakTarget.first, panCapacityRatio)
-        val rawFocusY = lerp(0.50f, clampedPeakTarget.second, panCapacityRatio)
+        val anchorFocusX = if (baseZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusX
+        val anchorFocusY = if (baseZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusY
+
+        val rawFocusX = lerp(anchorFocusX, clampedPeakTarget.first, panCapacityRatio)
+        val rawFocusY = lerp(anchorFocusY, clampedPeakTarget.second, panCapacityRatio)
 
         val finalFocus = clampFocusToKeepSubjectVisible(
             desiredFocusX = rawFocusX,
@@ -471,6 +459,60 @@ class KeyframeEditingEngine {
             subjectWidthRatio = activeSeg.subjectRegion.widthRatio,
             subjectHeightRatio = activeSeg.subjectRegion.heightRatio,
             spokenPhrase = activeSeg.spokenPhrase
+        )
+    }
+
+    /**
+     * Computes a smooth, C-infinity continuous peak focus point for `(subjectX, subjectY)` and `direction`.
+     * Uses soft rational saturation within the optical pan budget `0.5 - 0.5 / peakZoom` so off-center
+     * subjects (e.g. left at 0.36 or right at 0.62) and moving subjects (e.g. 0.40 -> 0.58) always
+     * produce smooth, continuous camera tracking without hitting a flat `coerceIn` wall or reversing direction.
+     */
+    private fun computeSmoothPeakFocus(
+        subjectX: Float,
+        subjectY: Float,
+        subjectW: Float,
+        subjectH: Float,
+        direction: CameraDirection,
+        peakZoom: Float,
+        trackProgress: Float,
+        enforceSafeZone: Boolean
+    ): Pair<Float, Float> {
+        val safePeakZoom = max(peakZoom, 1.04f)
+        val halfView = (0.5f / safePeakZoom).coerceIn(0.25f, 0.50f)
+        val maxPanBudget = (0.5f - halfView).coerceAtLeast(0.001f)
+
+        val directionSign = when (direction) {
+            CameraDirection.RIGHT -> 1.0f
+            CameraDirection.LEFT -> -1.0f
+            CameraDirection.CENTER -> 0.0f
+        }
+
+        // Unidirectional camera glide in the segment's assigned direction (never reverses mid-segment)
+        val directionalDemandX = directionSign * (0.34f + 0.22f * trackProgress.coerceIn(0f, 1f))
+        // Proportional subject-tracking demand relative to frame center (0.50)
+        val subjectDemandX = (subjectX - 0.50f) / 0.24f
+        val combinedDemandX = subjectDemandX * 0.78f + directionalDemandX * 0.38f
+
+        val subjectDemandY = ((subjectY - 0.50f) - 0.008f) / 0.24f
+
+        // Smooth C-infinity rational saturation: f(u) = u / sqrt(1 + u^2) in (-1, +1)
+        val normOffsetX = combinedDemandX / kotlin.math.sqrt(1.0f + combinedDemandX * combinedDemandX)
+        val normOffsetY = subjectDemandY / kotlin.math.sqrt(1.0f + subjectDemandY * subjectDemandY)
+
+        // Use 94% of maxPanBudget so the soft curve stays cleanly inside the optical frame bounds
+        val desiredFocusX = 0.50f + normOffsetX * maxPanBudget * 0.94f
+        val desiredFocusY = 0.50f + normOffsetY * maxPanBudget * 0.94f
+
+        return clampFocusToKeepSubjectVisible(
+            desiredFocusX = desiredFocusX,
+            desiredFocusY = desiredFocusY,
+            zoom = safePeakZoom,
+            subjectX = subjectX,
+            subjectY = subjectY,
+            subjectW = subjectW,
+            subjectH = subjectH,
+            enforceSafeZone = enforceSafeZone
         )
     }
 
@@ -547,12 +589,16 @@ class KeyframeEditingEngine {
 
     private fun applyEasing(t: Float, easingType: EasingType): Float {
         val x = t.coerceIn(0f, 1f)
+        val cosineEase = (0.5f * (1.0 - cos(PI * x))).toFloat()
         return when (easingType) {
-            // C2-continuous Quintic Smoothstep (zero velocity & zero acceleration jumps at both ends)
-            EasingType.CUBIC_HERMITE -> x * x * x * (x * (x * 6f - 15f) + 10f)
-            EasingType.COSINE_EASE -> (0.5f * (1.0 - cos(PI * x))).toFloat()
+            // Smooth C2-damped Cosine + Quintic Hermite blend (zero endpoint velocity & gentle mid-curve slope)
+            EasingType.CUBIC_HERMITE -> {
+                val quintic = x * x * x * (x * (x * 6f - 15f) + 10f)
+                0.55f * cosineEase + 0.45f * quintic
+            }
+            EasingType.COSINE_EASE -> cosineEase
             // Even in linear mode, apply gentle cosine rounding at endpoints to prevent sudden jerks
-            EasingType.LINEAR -> (0.5f * (1.0 - cos(PI * x))).toFloat()
+            EasingType.LINEAR -> cosineEase
         }
     }
 

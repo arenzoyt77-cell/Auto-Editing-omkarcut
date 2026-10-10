@@ -116,7 +116,8 @@ fun TimelineEditorScreen(
     onExportVideoClick: () -> Unit,
     onOpenSettingsClick: () -> Unit,
     onBackClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    evaluateTransformUs: ((Long) -> CameraTransform)? = null
 ) {
     BackHandler(onBack = onBackClick)
 
@@ -234,6 +235,7 @@ fun TimelineEditorScreen(
                     showTrackingHud = showTrackingHud,
                     segments = segments,
                     evaluateTransform = evaluateTransform,
+                    evaluateTransformUs = evaluateTransformUs,
                     onPositionChanged = onPositionChanged,
                     onPlaybackEnded = {
                         val firstStart = segments.firstOrNull()?.startMs ?: 0L
