@@ -104,12 +104,17 @@ fun VideoPreviewPlayer(
     var liveTransform by remember {
         mutableStateOf(evaluateAtUs(seekToPositionMs * 1000L))
     }
+    var lastInternalReportedPosMs by remember { mutableStateOf(-1L) }
 
     // Immediately reflect manual edits to segments, direction, zoom, tracking, or auto-edit toggle
-    LaunchedEffect(segments, previewAutoEditEnabled, seekToPositionMs) {
-        if (!isPlaying) {
-            liveTransform = evaluateAtUs(seekToPositionMs * 1000L)
+    LaunchedEffect(segments, previewAutoEditEnabled) {
+        val mp = mediaPlayer
+        val posUs = if (mp != null && isPlayerPrepared) {
+            mp.currentPosition.toLong().coerceAtLeast(0L) * 1000L
+        } else {
+            seekToPositionMs * 1000L
         }
+        liveTransform = evaluateAtUs(posUs)
     }
 
     // Sync play/pause state with MediaPlayer
@@ -126,18 +131,22 @@ fun VideoPreviewPlayer(
         }
     }
 
-    // Sync external scrub/segment selection seeks
+    // Sync external scrub/segment selection seeks (ignore echo from internal playback loop)
     LaunchedEffect(seekToPositionMs, isPlayerPrepared) {
         val mp = mediaPlayer ?: return@LaunchedEffect
         if (!isPlayerPrepared) return@LaunchedEffect
+        if (kotlin.math.abs(seekToPositionMs - lastInternalReportedPosMs) <= 45L) {
+            return@LaunchedEffect
+        }
         try {
             val currentPos = mp.currentPosition.toLong()
-            if (kotlin.math.abs(currentPos - seekToPositionMs) > 220L) {
+            if (kotlin.math.abs(currentPos - seekToPositionMs) > 180L || !mp.isPlaying) {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     mp.seekTo(seekToPositionMs, MediaPlayer.SEEK_CLOSEST)
                 } else {
                     mp.seekTo(seekToPositionMs.toInt())
                 }
+                lastInternalReportedPosMs = seekToPositionMs
                 liveTransform = evaluateAtUs(seekToPositionMs * 1000L)
             }
         } catch (_: Exception) {
@@ -198,21 +207,25 @@ fun VideoPreviewPlayer(
                                     mp.seekTo(nextSeg.startMs.toInt())
                                 }
                                 smoothPosUs = nextSeg.startMs * 1000L
+                                lastInternalReportedPosMs = nextSeg.startMs
                                 currentOnPositionChanged(nextSeg.startMs)
                                 liveTransform = evaluateAtUs(smoothPosUs)
                             } else {
                                 val firstSeg = segs.first()
                                 mp.seekTo(firstSeg.startMs.toInt())
                                 smoothPosUs = firstSeg.startMs * 1000L
+                                lastInternalReportedPosMs = firstSeg.startMs
                                 currentOnPositionChanged(firstSeg.startMs)
                                 liveTransform = evaluateAtUs(smoothPosUs)
                             }
                         } else {
+                            lastInternalReportedPosMs = smoothPosMs
                             currentOnPositionChanged(smoothPosMs)
                             liveTransform = evaluateAtUs(currentSmoothUs)
                         }
                     } else {
                         if (mp.isPlaying) {
+                            lastInternalReportedPosMs = smoothPosMs
                             currentOnPositionChanged(smoothPosMs)
                         }
                         liveTransform = evaluateAtUs(currentSmoothUs)

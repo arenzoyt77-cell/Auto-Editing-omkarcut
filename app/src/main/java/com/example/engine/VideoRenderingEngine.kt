@@ -627,7 +627,8 @@ class VideoRenderingEngine(
                 val segFrames = segmentFrameCounts[segIdx]
                 val segStartUs = segment.startMs * 1000L
                 val segEndUs = segment.endMs * 1000L
-                val singleSegmentList = listOf(segment)
+                val nextSeg = segments.getOrNull(segIdx + 1)
+                val isContiguousWithNext = nextSeg != null && abs(nextSeg.startMs - segment.endMs) <= 50L
 
                 if (decoderReady) {
                     activeDecoder.prepareForSegment(segStartUs)
@@ -641,10 +642,13 @@ class VideoRenderingEngine(
                     // Section 2: Place sequentially onto continuous timeline starting at 00:00:00.000
                     val continuousPtsUs = segmentTimelineOffsetUs + localSegmentPtsUs
                     val targetSourceUs = (segStartUs + localSegmentPtsUs).coerceAtMost(segEndUs)
-                    val keyframeEvalUs = if (segFrames > 1) {
-                        segStartUs + ((segEndUs - segStartUs) * localFrameIdx.toLong()) / (segFrames - 1).toLong()
+                    // For contiguous segments, frame 0 of nextSeg lands on segEndUs, so evaluating at
+                    // targetSourceUs advances by uniform frameDurationUs without duplicate split timestamps.
+                    // For the final segment (or before a cut gap), ensure the final frame reaches segEndUs.
+                    val keyframeEvalUs = if (!isContiguousWithNext && localFrameIdx == segFrames - 1) {
+                        segEndUs
                     } else {
-                        segStartUs
+                        targetSourceUs
                     }
 
                     val sourceBitmap: Bitmap? = if (decoderReady) {
@@ -666,9 +670,10 @@ class VideoRenderingEngine(
                     }
 
                     val transform = keyframeEngine.evaluateTransformAtUs(
-                        segments = singleSegmentList,
+                        segments = segments,
                         positionUs = keyframeEvalUs,
-                        easingType = config.easingType
+                        easingType = config.easingType,
+                        segmentIndexHint = segIdx
                     )
 
                     submittedContinuousPtsQueue.addLast(continuousPtsUs)
@@ -1085,7 +1090,8 @@ class VideoRenderingEngine(
             }
 
             var safetySteps = 0
-            while (!outputEos && safetySteps < 200) {
+            var tryAgainAfterInputEos = 0
+            while (!outputEos && safetySteps < 240) {
                 safetySteps++
 
                 // Feed available input buffers without blocking (0us timeout) to keep hardware pipeline full
@@ -1110,9 +1116,10 @@ class VideoRenderingEngine(
                     fedCount++
                 }
 
-                val outTimeoutUs = if (safetySteps == 1) 500L else 2_000L
+                val outTimeoutUs = if (inputEos) 2_500L else if (safetySteps == 1) 500L else 2_000L
                 val outIdx = dec.dequeueOutputBuffer(bufferInfo, outTimeoutUs)
                 if (outIdx >= 0) {
+                    tryAgainAfterInputEos = 0
                     val framePtsUs = bufferInfo.presentationTimeUs
                     val isEos = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
                     val reachedTarget = framePtsUs >= targetTimeUs - frameToleranceUs || isEos
@@ -1144,7 +1151,10 @@ class VideoRenderingEngine(
                         break
                     }
                 } else if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER && inputEos) {
-                    break
+                    tryAgainAfterInputEos++
+                    if (tryAgainAfterInputEos >= 16) {
+                        break
+                    }
                 }
             }
 

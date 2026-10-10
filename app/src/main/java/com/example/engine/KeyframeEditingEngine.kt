@@ -61,7 +61,7 @@ class KeyframeEditingEngine {
                 )
             }
 
-            // Strict alternating camera pattern:
+            // Preserve existing RIGHT / LEFT alternating camera decision logic:
             // Segment 1 (i=0) -> RIGHT
             // Segment 2 (i=1) -> LEFT
             // Segment 3 (i=2) -> RIGHT
@@ -69,16 +69,18 @@ class KeyframeEditingEngine {
             val direction = if (i % 2 == 0) CameraDirection.RIGHT else CameraDirection.LEFT
 
             // Automatically calculate per-segment zoom start time, zoom peak time, zoom hold end time,
-            // zoom end time, and subtle cinematic zoom amount (1.08x–1.15x)
+            // zoom end time, and adaptive cinematic zoom amount (1.08x–1.15x) from duration, subject, and speech energy
             val zoomTiming = calculateSegmentZoomTiming(
                 startMs = raw.startMs,
                 endMs = raw.endMs,
                 subject = subject,
-                config = config
+                config = config,
+                peakDb = raw.peakDb,
+                speechConfidence = raw.confidence
             )
             val smartZoomPeak = zoomTiming.zoomPeakScale
 
-            // Start of segment begins smoothly at 1.00x so there is never an abrupt scale jump at cuts
+            // Start of segment begins smoothly at base zoom (1.00x) so there is never an abrupt scale jump at cuts
             val startZoom = config.minZoom.coerceIn(1.00f, 1.04f)
 
             val clampedStartFocus = clampFocusToKeepSubjectVisible(
@@ -106,12 +108,24 @@ class KeyframeEditingEngine {
                 enforceSafeZone = config.keepSubjectInSafeZone
             )
 
+            val clampedEndFocus = clampFocusToKeepSubjectVisible(
+                desiredFocusX = 0.50f,
+                desiredFocusY = 0.50f,
+                zoom = startZoom,
+                subjectX = subject.endCenterX,
+                subjectY = subject.endCenterY,
+                subjectW = subject.widthRatio,
+                subjectH = subject.heightRatio,
+                enforceSafeZone = config.keepSubjectInSafeZone
+            )
+
             val keyframeA = CameraKeyframe(
                 normalizedTime = 0.0f,
                 zoom = startZoom,
                 focusX = clampedStartFocus.first,
                 focusY = clampedStartFocus.second,
-                label = "KEYFRAME A"
+                label = "KEYFRAME A",
+                timestampMs = raw.startMs
             )
 
             val keyframeB = CameraKeyframe(
@@ -119,7 +133,17 @@ class KeyframeEditingEngine {
                 zoom = smartZoomPeak,
                 focusX = clampedPeakFocus.first,
                 focusY = clampedPeakFocus.second,
-                label = "KEYFRAME B"
+                label = "KEYFRAME B",
+                timestampMs = zoomTiming.zoomPeakTimeMs
+            )
+
+            val endKeyframe = CameraKeyframe(
+                normalizedTime = 1.0f,
+                zoom = startZoom,
+                focusX = clampedEndFocus.first,
+                focusY = clampedEndFocus.second,
+                label = "KEYFRAME END",
+                timestampMs = raw.endMs
             )
 
             segments.add(
@@ -140,6 +164,7 @@ class KeyframeEditingEngine {
                     zoomPeakTimeMs = zoomTiming.zoomPeakTimeMs,
                     zoomHoldEndTimeMs = zoomTiming.zoomHoldEndTimeMs,
                     zoomEndTimeMs = zoomTiming.zoomEndTimeMs,
+                    endKeyframe = endKeyframe,
                     isModifiedManually = false,
                     autoDefaultDirection = direction,
                     autoDefaultZoomPeak = smartZoomPeak,
@@ -151,7 +176,115 @@ class KeyframeEditingEngine {
             )
         }
 
-        return segments
+        return synchronizeConsecutiveBoundaryKeyframes(
+            segments = segments,
+            keepSubjectInSafeZone = config.keepSubjectInSafeZone
+        )
+    }
+
+    /**
+     * Ensures consecutive segments remain temporally consistent:
+     * - Preserves existing keyframes when valid.
+     * - Anchors each segment's first keyframe (`keyframeA`) at `startMs` and final keyframe (`endKeyframe`) at `endMs`.
+     * - Unless there is an intentional non-contiguous cut gap, matches segment `i`'s final boundary transform
+     *   with segment `i + 1`'s starting boundary transform so there is never an instant reset at a split.
+     */
+    fun synchronizeConsecutiveBoundaryKeyframes(
+        segments: List<VideoSegment>,
+        keepSubjectInSafeZone: Boolean = true
+    ): List<VideoSegment> {
+        if (segments.isEmpty()) return emptyList()
+        val result = segments.toMutableList()
+
+        for (i in result.indices) {
+            val seg = result[i]
+            val prevSeg = if (i > 0) result[i - 1] else null
+            val isContiguousWithPrev = prevSeg != null && abs(seg.startMs - prevSeg.endMs) <= 50L
+
+            val startZoom = seg.keyframeA.zoom.coerceIn(1.00f, 1.25f)
+            val resolvedStartKf = if (isContiguousWithPrev && prevSeg != null) {
+                val boundaryZoom = startZoom
+                val sharedSubjectX = (prevSeg.subjectRegion.endCenterX + seg.subjectRegion.startCenterX) * 0.5f
+                val sharedSubjectY = (prevSeg.subjectRegion.endCenterY + seg.subjectRegion.startCenterY) * 0.5f
+                val sharedW = max(prevSeg.subjectRegion.widthRatio, seg.subjectRegion.widthRatio)
+                val sharedH = max(prevSeg.subjectRegion.heightRatio, seg.subjectRegion.heightRatio)
+                val sharedFocus = clampFocusToKeepSubjectVisible(
+                    desiredFocusX = seg.keyframeA.focusX,
+                    desiredFocusY = seg.keyframeA.focusY,
+                    zoom = boundaryZoom,
+                    subjectX = sharedSubjectX,
+                    subjectY = sharedSubjectY,
+                    subjectW = sharedW,
+                    subjectH = sharedH,
+                    enforceSafeZone = keepSubjectInSafeZone
+                )
+                val syncedEndKf = prevSeg.endKeyframe.copy(
+                    normalizedTime = 1.0f,
+                    zoom = boundaryZoom,
+                    focusX = sharedFocus.first,
+                    focusY = sharedFocus.second,
+                    timestampMs = prevSeg.endMs
+                )
+                result[i - 1] = prevSeg.copy(
+                    zoomEndTimeMs = prevSeg.endMs,
+                    endKeyframe = syncedEndKf
+                )
+                seg.keyframeA.copy(
+                    normalizedTime = 0.0f,
+                    zoom = boundaryZoom,
+                    focusX = sharedFocus.first,
+                    focusY = sharedFocus.second,
+                    timestampMs = seg.startMs
+                )
+            } else {
+                val clampedStart = clampFocusToKeepSubjectVisible(
+                    desiredFocusX = seg.keyframeA.focusX,
+                    desiredFocusY = seg.keyframeA.focusY,
+                    zoom = startZoom,
+                    subjectX = seg.subjectRegion.startCenterX,
+                    subjectY = seg.subjectRegion.startCenterY,
+                    subjectW = seg.subjectRegion.widthRatio,
+                    subjectH = seg.subjectRegion.heightRatio,
+                    enforceSafeZone = keepSubjectInSafeZone
+                )
+                seg.keyframeA.copy(
+                    normalizedTime = 0.0f,
+                    zoom = startZoom,
+                    focusX = clampedStart.first,
+                    focusY = clampedStart.second,
+                    timestampMs = seg.startMs
+                )
+            }
+
+            val endZoom = seg.endKeyframe.zoom.coerceIn(1.00f, 1.25f)
+            val clampedEnd = clampFocusToKeepSubjectVisible(
+                desiredFocusX = seg.endKeyframe.focusX,
+                desiredFocusY = seg.endKeyframe.focusY,
+                zoom = endZoom,
+                subjectX = seg.subjectRegion.endCenterX,
+                subjectY = seg.subjectRegion.endCenterY,
+                subjectW = seg.subjectRegion.widthRatio,
+                subjectH = seg.subjectRegion.heightRatio,
+                enforceSafeZone = keepSubjectInSafeZone
+            )
+            val resolvedEndKf = seg.endKeyframe.copy(
+                normalizedTime = 1.0f,
+                zoom = endZoom,
+                focusX = clampedEnd.first,
+                focusY = clampedEnd.second,
+                timestampMs = seg.endMs
+            )
+
+            result[i] = seg.copy(
+                zoomStartTimeMs = seg.startMs,
+                zoomEndTimeMs = seg.endMs,
+                keyframeA = resolvedStartKf,
+                keyframeB = seg.keyframeB.copy(timestampMs = seg.zoomPeakTimeMs),
+                endKeyframe = resolvedEndKf
+            )
+        }
+
+        return result
     }
 
     /**
@@ -161,35 +294,41 @@ class KeyframeEditingEngine {
      * - zoomHoldEndTimeMs
      * - zoomEndTimeMs
      * - zoomPeakScale (subtle cinematic 1.08x–1.15x)
-     * based on segment duration, subject size, subject position, and movement.
+     * based on segment duration, subject size, subject position, movement, and speech intensity.
      */
     fun calculateSegmentZoomTiming(
         startMs: Long,
         endMs: Long,
         subject: SubjectRegion,
-        config: AutoCutConfig
+        config: AutoCutConfig,
+        peakDb: Float = -6f,
+        speechConfidence: Float = 0.90f
     ): SegmentZoomTiming {
         val durationMs = (endMs - startMs).coerceAtLeast(200L)
         val peakZoom = calculateSmartZoom(
             subject = subject,
             durationMs = durationMs,
-            config = config
+            config = config,
+            peakDb = peakDb,
+            speechConfidence = speechConfidence
         )
 
-        // Off-center subjects take slightly longer to smoothly glide onto so motion never feels rushed
+        // Off-center subjects or stronger zoom amplitudes take slightly longer to glide onto smoothly
         val centerOffsetDist = abs(subject.startCenterX - 0.50f) + abs(subject.endCenterX - 0.50f)
-        val offsetAdjustment = (centerOffsetDist * 0.05f).coerceIn(0f, 0.04f)
+        val zoomAmplitudeFactor = ((peakZoom - 1.08f) / 0.07f).coerceIn(0f, 1f)
+        val offsetAdjustment = (centerOffsetDist * 0.045f + zoomAmplitudeFactor * 0.025f).coerceIn(0f, 0.05f)
 
         val peakStartNorm = when {
-            durationMs >= 3500L -> (0.29f + offsetAdjustment).coerceIn(0.27f, 0.35f)
-            durationMs >= 2000L -> (0.32f + offsetAdjustment).coerceIn(0.30f, 0.38f)
-            else -> 0.35f
+            durationMs >= 3500L -> (0.28f + offsetAdjustment).coerceIn(0.26f, 0.35f)
+            durationMs >= 2000L -> (0.31f + offsetAdjustment).coerceIn(0.29f, 0.38f)
+            else -> (0.34f + offsetAdjustment * 0.5f).coerceIn(0.32f, 0.39f)
         }
 
-        // Generous zoom-out window (33%–38% of segment) so zoom-out is always gradual and unhurried
+        // Adapt hold duration to segment length & speech confidence while keeping a smooth zoom-out window
+        val confidenceHoldBonus = ((speechConfidence - 0.85f) * 0.15f).coerceIn(-0.02f, 0.03f)
         val holdEndNorm = when {
-            durationMs >= 3500L -> 0.67f
-            durationMs >= 2000L -> 0.65f
+            durationMs >= 3500L -> (0.67f + confidenceHoldBonus).coerceIn(0.64f, 0.70f)
+            durationMs >= 2000L -> (0.65f + confidenceHoldBonus).coerceIn(0.62f, 0.68f)
             else -> 0.62f
         }
 
@@ -213,7 +352,7 @@ class KeyframeEditingEngine {
 
     /**
      * Recalculates a single segment's keyframes when the user manually edits direction, zoom,
-     * subject position, or split boundaries.
+     * subject position, or split boundaries, while preserving valid existing boundary keyframes.
      */
     fun rebuildSegmentKeyframes(
         segment: VideoSegment,
@@ -234,10 +373,13 @@ class KeyframeEditingEngine {
         )
         val safeStartZoom = newStartZoom.coerceIn(1.00f, 1.22f)
         val safePeakZoom = newPeakZoom.coerceIn(1.00f, 1.25f)
+        val safeEndZoom = segment.endKeyframe.zoom.coerceIn(1.00f, 1.22f)
 
+        val desiredStartX = if (safeStartZoom <= 1.001f) 0.50f else segment.keyframeA.focusX
+        val desiredStartY = if (safeStartZoom <= 1.001f) 0.50f else segment.keyframeA.focusY
         val startFocus = clampFocusToKeepSubjectVisible(
-            desiredFocusX = 0.50f,
-            desiredFocusY = 0.50f,
+            desiredFocusX = desiredStartX,
+            desiredFocusY = desiredStartY,
             zoom = safeStartZoom,
             subjectX = updatedSubject.startCenterX,
             subjectY = updatedSubject.startCenterY,
@@ -248,7 +390,7 @@ class KeyframeEditingEngine {
 
         val midSubjX = (updatedSubject.startCenterX + updatedSubject.endCenterX) * 0.5f
         val midSubjY = (updatedSubject.startCenterY + updatedSubject.endCenterY) * 0.5f
-        val endFocus = computeSmoothPeakFocus(
+        val peakFocus = computeSmoothPeakFocus(
             subjectX = midSubjX,
             subjectY = midSubjY,
             subjectW = updatedSubject.widthRatio,
@@ -259,39 +401,56 @@ class KeyframeEditingEngine {
             enforceSafeZone = keepSubjectInSafeZone
         )
 
-        val durationMs = (segment.endMs - segment.startMs).coerceAtLeast(200L)
-        val peakStartNorm = when {
-            durationMs >= 3500L -> 0.31f
-            durationMs >= 2000L -> 0.33f
-            else -> 0.35f
-        }
-        val holdEndNorm = when {
-            durationMs >= 3500L -> 0.67f
-            durationMs >= 2000L -> 0.65f
-            else -> 0.62f
-        }
-        val peakTimeMs = (segment.startMs + (durationMs * peakStartNorm).roundToLong())
-            .coerceIn(segment.startMs + 80L, segment.endMs - 120L)
-        val holdEndTimeMs = (segment.startMs + (durationMs * holdEndNorm).roundToLong())
-            .coerceIn(peakTimeMs + 40L, segment.endMs - 80L)
+        val desiredEndX = if (safeEndZoom <= 1.001f) 0.50f else segment.endKeyframe.focusX
+        val desiredEndY = if (safeEndZoom <= 1.001f) 0.50f else segment.endKeyframe.focusY
+        val endBoundaryFocus = clampFocusToKeepSubjectVisible(
+            desiredFocusX = desiredEndX,
+            desiredFocusY = desiredEndY,
+            zoom = safeEndZoom,
+            subjectX = updatedSubject.endCenterX,
+            subjectY = updatedSubject.endCenterY,
+            subjectW = updatedSubject.widthRatio,
+            subjectH = updatedSubject.heightRatio,
+            enforceSafeZone = keepSubjectInSafeZone
+        )
+
+        val timing = calculateSegmentZoomTiming(
+            startMs = segment.startMs,
+            endMs = segment.endMs,
+            subject = updatedSubject,
+            config = AutoCutConfig(keepSubjectInSafeZone = keepSubjectInSafeZone),
+            peakDb = segment.peakDb,
+            speechConfidence = segment.speechConfidence
+        )
 
         return segment.copy(
             subjectRegion = updatedSubject,
             cameraDirection = newDirection,
             smartZoomPeak = safePeakZoom,
             zoomStartTimeMs = segment.startMs,
-            zoomPeakTimeMs = peakTimeMs,
-            zoomHoldEndTimeMs = holdEndTimeMs,
+            zoomPeakTimeMs = timing.zoomPeakTimeMs,
+            zoomHoldEndTimeMs = timing.zoomHoldEndTimeMs,
             zoomEndTimeMs = segment.endMs,
             keyframeA = segment.keyframeA.copy(
+                normalizedTime = 0.0f,
                 zoom = safeStartZoom,
                 focusX = startFocus.first,
-                focusY = startFocus.second
+                focusY = startFocus.second,
+                timestampMs = segment.startMs
             ),
             keyframeB = segment.keyframeB.copy(
+                normalizedTime = 1.0f,
                 zoom = safePeakZoom,
-                focusX = endFocus.first,
-                focusY = endFocus.second
+                focusX = peakFocus.first,
+                focusY = peakFocus.second,
+                timestampMs = timing.zoomPeakTimeMs
+            ),
+            endKeyframe = segment.endKeyframe.copy(
+                normalizedTime = 1.0f,
+                zoom = safeEndZoom,
+                focusX = endBoundaryFocus.first,
+                focusY = endBoundaryFocus.second,
+                timestampMs = segment.endMs
             ),
             isModifiedManually = true
         )
@@ -316,18 +475,15 @@ class KeyframeEditingEngine {
      * Microsecond-accurate camera transform evaluator used by both the VSYNC preview clock and the
      * CFR video renderer so preview and exported video match with zero quantization stepping.
      *
-     * Dynamic multi-keyframe zoom envelope over normalized segment time `t` in [0, 1]:
-     * 1. [0.00 .. peakStartNorm] (`zoomStartTimeMs -> zoomPeakTimeMs`):
-     *    Smooth ease-in/ease-out zoom-in from `baseZoom` (1.00x) to `0.98` of `peakZoom` (1.08x–1.15x)
-     * 2. [peakStartNorm .. holdEndNorm] (`zoomPeakTimeMs -> zoomHoldEndTimeMs`):
-     *    Hold zoomed framing / very slowly crest from `0.98` to `1.00` (`peakZoom`) while following subject
-     * 3. [holdEndNorm .. 1.00] (`zoomHoldEndTimeMs -> zoomEndTimeMs`):
-     *    Smooth, gradual ease-in/ease-out zoom-out from `peakZoom` back toward `baseZoom` (1.00x) before segment ends.
+     * Uses each segment's first boundary keyframe (`keyframeA` at `startMs`), peak target keyframe
+     * (`keyframeB` at `zoomPeakTimeMs..zoomHoldEndTimeMs`), and final boundary keyframe (`endKeyframe`
+     * at `endMs`, matched to the next contiguous segment's `keyframeA`) with continuous ease-in/ease-out.
      */
     fun evaluateTransformAtUs(
         segments: List<VideoSegment>,
         positionUs: Long,
-        easingType: EasingType = EasingType.CUBIC_HERMITE
+        easingType: EasingType = EasingType.CUBIC_HERMITE,
+        segmentIndexHint: Int = -1
     ): CameraTransform {
         if (segments.isEmpty()) {
             return CameraTransform(
@@ -347,11 +503,34 @@ class KeyframeEditingEngine {
             )
         }
 
-        val activeSeg = segments.firstOrNull {
-            positionUs >= it.startMs * 1000L && positionUs <= it.endMs * 1000L
-        } ?: segments.minByOrNull {
-            min(abs(positionUs - it.startMs * 1000L), abs(positionUs - it.endMs * 1000L))
-        }!!
+        val resolvedListIndex = if (segmentIndexHint in segments.indices) {
+            segmentIndexHint
+        } else {
+            // Prefer the starting segment at an exact split boundary (positionUs == nextSeg.startMs * 1000L)
+            // while still matching the last segment at its final endMs timestamp.
+            val nonTerminalMatch = segments.indexOfFirst {
+                positionUs >= it.startMs * 1000L && positionUs < it.endMs * 1000L
+            }
+            if (nonTerminalMatch >= 0) {
+                nonTerminalMatch
+            } else {
+                val inclusiveMatch = segments.indexOfLast {
+                    positionUs >= it.startMs * 1000L && positionUs <= it.endMs * 1000L
+                }
+                if (inclusiveMatch >= 0) {
+                    inclusiveMatch
+                } else {
+                    segments.indices.minByOrNull { idx ->
+                        val seg = segments[idx]
+                        min(abs(positionUs - seg.startMs * 1000L), abs(positionUs - seg.endMs * 1000L))
+                    } ?: 0
+                }
+            }
+        }
+
+        val activeSeg = segments[resolvedListIndex]
+        val nextSeg = segments.getOrNull(resolvedListIndex + 1)
+        val isContiguousWithNext = nextSeg != null && abs(nextSeg.startMs - activeSeg.endMs) <= 50L
 
         val segStartUs = activeSeg.startMs * 1000L
         val segDurationUs = ((activeSeg.endMs - activeSeg.startMs) * 1000L).coerceAtLeast(100_000L)
@@ -373,40 +552,65 @@ class KeyframeEditingEngine {
             0.66f
         }
 
-        val baseZoom = activeSeg.keyframeA.zoom.coerceIn(1.00f, 1.22f)
-        val peakZoom = max(baseZoom, activeSeg.smartZoomPeak.coerceIn(1.00f, 1.25f))
+        // First boundary keyframe (exact start of segment) and Last boundary keyframe (exact end of segment)
+        val startZoom = activeSeg.keyframeA.zoom.coerceIn(1.00f, 1.25f)
+        val endZoom = if (isContiguousWithNext && nextSeg != null) {
+            nextSeg.keyframeA.zoom.coerceIn(1.00f, 1.25f)
+        } else {
+            activeSeg.endKeyframe.zoom.coerceIn(1.00f, 1.25f)
+        }
+        val peakZoom = max(max(startZoom, endZoom), activeSeg.smartZoomPeak.coerceIn(1.00f, 1.25f))
 
-        // Compute dynamic 3-stage zoom envelope in [0f .. 1f] using smooth ease-in/ease-out interpolation:
-        // Stage 1 (Start -> Peak): Smoothly increase from 0.0 -> 0.98
-        // Stage 2 (Peak -> HoldEnd): Hold / very slowly continue from 0.98 -> 1.00
-        // Stage 3 (HoldEnd -> End): Smoothly and gradually return from 1.00 -> 0.00 before segment ends
-        val holdEntryFraction = 0.98f
-        val zoomEnvelope: Float = when {
+        // Dynamic 3-stage smooth interpolation between Start Keyframe -> Peak/Hold -> End Keyframe:
+        val holdEntryFraction = 0.985f
+        val currentZoom: Float
+        val phaseBlendToEnd: Float
+        val zoomEnvelope: Float
+
+        when {
             rawT <= peakStartNorm -> {
                 val localInT = (rawT / peakStartNorm.coerceAtLeast(0.05f)).coerceIn(0f, 1f)
-                applyEasing(localInT, easingType) * holdEntryFraction
+                val easedIn = applyEasing(localInT, easingType)
+                zoomEnvelope = easedIn * holdEntryFraction
+                currentZoom = lerp(startZoom, peakZoom, zoomEnvelope)
+                phaseBlendToEnd = 0.0f
             }
             rawT <= holdEndNorm -> {
                 val localHoldT = ((rawT - peakStartNorm) / (holdEndNorm - peakStartNorm).coerceAtLeast(0.05f))
                     .coerceIn(0f, 1f)
-                holdEntryFraction + (1.0f - holdEntryFraction) * applyEasing(localHoldT, easingType)
+                val easedHold = applyEasing(localHoldT, easingType)
+                zoomEnvelope = holdEntryFraction + (1.0f - holdEntryFraction) * easedHold
+                currentZoom = lerp(startZoom, peakZoom, zoomEnvelope)
+                phaseBlendToEnd = easedHold * 0.5f
             }
             else -> {
                 val localOutT = ((rawT - holdEndNorm) / (1.0f - holdEndNorm).coerceAtLeast(0.05f))
                     .coerceIn(0f, 1f)
-                1.0f - applyEasing(localOutT, easingType)
+                val easedOut = applyEasing(localOutT, easingType)
+                zoomEnvelope = 1.0f - easedOut
+                currentZoom = lerp(endZoom, peakZoom, zoomEnvelope)
+                phaseBlendToEnd = 0.5f + easedOut * 0.5f
             }
-        }.coerceIn(0f, 1f)
-
-        val currentZoom = lerp(baseZoom, peakZoom, zoomEnvelope)
+        }
 
         // Smoothly follow the moving subject across the segment using continuous ease-in/ease-out
         val smoothTrackT = applyEasing(rawT, easingType)
         val (liveSubjX, liveSubjY) = activeSeg.subjectRegion.centerAt(smoothTrackT)
 
-        // Compute soft-saturated peak target focus that smoothly combines subject tracking and
-        // unidirectional LEFT/RIGHT camera movement without ever hitting a hard boundary kink
-        val clampedPeakTarget = computeSmoothPeakFocus(
+        // Compute dynamic subject-tracked peak focus and incorporate any preserved/custom keyframeB offset
+        val midSubjX = (activeSeg.subjectRegion.startCenterX + activeSeg.subjectRegion.endCenterX) * 0.5f
+        val midSubjY = (activeSeg.subjectRegion.startCenterY + activeSeg.subjectRegion.endCenterY) * 0.5f
+        val defaultMidPeakFocus = computeSmoothPeakFocus(
+            subjectX = midSubjX,
+            subjectY = midSubjY,
+            subjectW = activeSeg.subjectRegion.widthRatio,
+            subjectH = activeSeg.subjectRegion.heightRatio,
+            direction = activeSeg.cameraDirection,
+            peakZoom = max(peakZoom, 1.04f),
+            trackProgress = 0.5f,
+            enforceSafeZone = true
+        )
+        val livePeakFocus = computeSmoothPeakFocus(
             subjectX = liveSubjX,
             subjectY = liveSubjY,
             subjectW = activeSeg.subjectRegion.widthRatio,
@@ -417,22 +621,45 @@ class KeyframeEditingEngine {
             enforceSafeZone = true
         )
 
-        // Scale the focus offset by the optical pan capacity ratio `(1 - 1/currentZoom) / (1 - 1/peakZoom)`.
-        // Because `currentZoom * (1 - 1/currentZoom) == currentZoom - 1`, screen-space pixel translation
-        // is strictly proportional to `zoomEnvelope` and blends zoom-in, hold, and zoom-out seamlessly.
+        val customOffsetX = (activeSeg.keyframeB.focusX - defaultMidPeakFocus.first).coerceIn(-0.18f, 0.18f)
+        val customOffsetY = (activeSeg.keyframeB.focusY - defaultMidPeakFocus.second).coerceIn(-0.18f, 0.18f)
+        val clampedPeakTarget = clampFocusToKeepSubjectVisible(
+            desiredFocusX = livePeakFocus.first + customOffsetX,
+            desiredFocusY = livePeakFocus.second + customOffsetY,
+            zoom = max(peakZoom, 1.04f),
+            subjectX = liveSubjX,
+            subjectY = liveSubjY,
+            subjectW = activeSeg.subjectRegion.widthRatio,
+            subjectH = activeSeg.subjectRegion.heightRatio,
+            enforceSafeZone = true
+        )
+
+        // Start & End boundary focus anchors from keyframeA and endKeyframe / nextSeg.keyframeA
+        val startAnchorFocusX = if (startZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusX
+        val startAnchorFocusY = if (startZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusY
+        val rawEndKeyframe = if (isContiguousWithNext && nextSeg != null) nextSeg.keyframeA else activeSeg.endKeyframe
+        val endAnchorFocusX = if (endZoom <= 1.001f) 0.50f else rawEndKeyframe.focusX
+        val endAnchorFocusY = if (endZoom <= 1.001f) 0.50f else rawEndKeyframe.focusY
+
+        val boundaryAnchorX = lerp(startAnchorFocusX, endAnchorFocusX, phaseBlendToEnd)
+        val boundaryAnchorY = lerp(startAnchorFocusY, endAnchorFocusY, phaseBlendToEnd)
+        val boundaryZoom = lerp(startZoom, endZoom, phaseBlendToEnd)
+
+        // Scale the focus offset by the optical pan capacity ratio above the boundary zoom.
+        // At rawT=0 (currentZoom == startZoom) and rawT=1 (currentZoom == endZoom), panCapacityRatio == 0,
+        // guaranteeing exact agreement with keyframeA at startMs and endKeyframe/nextSeg.keyframeA at endMs.
+        val boundaryPanCapacity = 1.0f - (1.0f / max(boundaryZoom, 1.0001f))
         val peakPanCapacity = 1.0f - (1.0f / max(peakZoom, 1.001f))
         val currentPanCapacity = 1.0f - (1.0f / max(currentZoom, 1.0001f))
-        val panCapacityRatio = if (peakPanCapacity > 0.001f) {
-            (currentPanCapacity / peakPanCapacity).coerceIn(0f, 1f)
+        val panSpan = peakPanCapacity - boundaryPanCapacity
+        val panCapacityRatio = if (panSpan > 0.001f) {
+            ((currentPanCapacity - boundaryPanCapacity) / panSpan).coerceIn(0f, 1f)
         } else {
-            zoomEnvelope
+            zoomEnvelope.coerceIn(0f, 1f)
         }
 
-        val anchorFocusX = if (baseZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusX
-        val anchorFocusY = if (baseZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusY
-
-        val rawFocusX = lerp(anchorFocusX, clampedPeakTarget.first, panCapacityRatio)
-        val rawFocusY = lerp(anchorFocusY, clampedPeakTarget.second, panCapacityRatio)
+        val rawFocusX = lerp(boundaryAnchorX, clampedPeakTarget.first, panCapacityRatio)
+        val rawFocusY = lerp(boundaryAnchorY, clampedPeakTarget.second, panCapacityRatio)
 
         val finalFocus = clampFocusToKeepSubjectVisible(
             desiredFocusX = rawFocusX,
@@ -488,11 +715,14 @@ class KeyframeEditingEngine {
             CameraDirection.CENTER -> 0.0f
         }
 
-        // Unidirectional camera glide in the segment's assigned direction (never reverses mid-segment)
-        val directionalDemandX = directionSign * (0.34f + 0.22f * trackProgress.coerceIn(0f, 1f))
+        // Temper directional bias when subject is already strongly off-center so framing follows the actual subject
+        val subjectOffsetAbs = abs(subjectX - 0.50f)
+        val directionalScale = (1.0f - (subjectOffsetAbs * 1.6f).coerceIn(0f, 0.55f))
+        val directionalDemandX = directionSign * (0.32f + 0.20f * trackProgress.coerceIn(0f, 1f)) * directionalScale
+
         // Proportional subject-tracking demand relative to frame center (0.50)
-        val subjectDemandX = (subjectX - 0.50f) / 0.24f
-        val combinedDemandX = subjectDemandX * 0.78f + directionalDemandX * 0.38f
+        val subjectDemandX = (subjectX - 0.50f) / 0.22f
+        val combinedDemandX = subjectDemandX * 0.82f + directionalDemandX * 0.36f
 
         val subjectDemandY = ((subjectY - 0.50f) - 0.008f) / 0.24f
 
@@ -517,24 +747,27 @@ class KeyframeEditingEngine {
     }
 
     /**
-     * Calculates a subtle, cinematic peak zoom in the 1.08x–1.15x range based on
-     * subject size, subject position, movement, and segment duration.
+     * Calculates an adaptive, cinematic peak zoom in the 1.08x–1.15x range based on
+     * subject size, subject position, movement, segment duration, and vocal energy.
      */
     private fun calculateSmartZoom(
         subject: SubjectRegion,
         durationMs: Long,
-        config: AutoCutConfig
+        config: AutoCutConfig,
+        peakDb: Float = -6f,
+        speechConfidence: Float = 0.90f
     ): Float {
-        // Smaller subject -> slightly stronger zoom; larger subject -> gentler zoom
+        // Smaller subject -> stronger zoom-in; larger subject -> gentler zoom
         val sizeFactor = (1.0f - subject.widthRatio.coerceIn(0.20f, 0.55f)) // 0.45 .. 0.80
         // Longer speaker turns support fuller 1.12x–1.15x zoom; shorter clips use gentler 1.08x–1.11x zoom
-        val durationFactor = ((durationMs - 600L).toFloat() / 2600f).coerceIn(0.20f, 1.0f)
+        val durationFactor = ((durationMs - 600L).toFloat() / 2600f).coerceIn(0.18f, 1.0f)
+        // Vocal energy & confidence add subtle dynamic variation across turns
+        val energyFactor = ((peakDb + 18f) / 16f).coerceIn(0.15f, 1.0f) * speechConfidence.coerceIn(0.7f, 1.0f)
         // High subject movement tempers zoom slightly so the moving subject stays smoothly framed
         val motionDampener = (1.0f - subject.motionMagnitude * 0.28f).coerceIn(0.72f, 1.0f)
 
-        val blend = (sizeFactor * 0.50f + durationFactor * 0.50f) * motionDampener
+        val blend = (sizeFactor * 0.42f + durationFactor * 0.38f + energyFactor * 0.20f) * motionDampener
         val minPeak = config.targetZoomMin.coerceIn(1.08f, 1.12f)
-        // Keep automatic zoom subtle and cinematic (1.08x–1.15x default range)
         val maxPeak = min(config.targetZoomMax, 1.15f).coerceAtLeast(minPeak)
 
         return (minPeak + (maxPeak - minPeak) * blend).coerceIn(1.08f, 1.15f)

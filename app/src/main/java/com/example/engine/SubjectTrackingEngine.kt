@@ -53,6 +53,7 @@ class SubjectTrackingEngine {
                         retriever = retriever,
                         startMs = seg.startMs,
                         endMs = seg.endMs,
+                        segmentIndex = index,
                         prevEndX = stabilizedPrevEndX,
                         prevEndY = stabilizedPrevEndY
                     )
@@ -80,6 +81,7 @@ class SubjectTrackingEngine {
         retriever: MediaMetadataRetriever,
         startMs: Long,
         endMs: Long,
+        segmentIndex: Int,
         prevEndX: Float,
         prevEndY: Float
     ): SubjectRegion {
@@ -117,12 +119,31 @@ class SubjectTrackingEngine {
             frameStart.getPixels(pixelsStart, 0, w, 0, 0, w, h)
             frameEnd.getPixels(pixelsEnd, 0, w, 0, 0, w, h)
 
-            val startAnalysis = computeSaliencyAndMotionCentroid(pixelsStart, pixelsEnd, w, h, isStartFrame = true)
-            val endAnalysis = computeSaliencyAndMotionCentroid(pixelsEnd, pixelsStart, w, h, isStartFrame = false)
+            val preferRightSide = (segmentIndex % 2 == 0)
+            val startAnalysis = computeSaliencyAndMotionCentroid(
+                primaryPixels = pixelsStart,
+                referencePixels = pixelsEnd,
+                w = w,
+                h = h,
+                preferRightSide = preferRightSide
+            )
+            val endAnalysis = computeSaliencyAndMotionCentroid(
+                primaryPixels = pixelsEnd,
+                referencePixels = pixelsStart,
+                w = w,
+                h = h,
+                preferRightSide = preferRightSide
+            )
             val midAnalysis = if (frameMid != null && frameMid.width == w && frameMid.height == h) {
                 val pixelsMid = IntArray(w * h)
                 frameMid.getPixels(pixelsMid, 0, w, 0, 0, w, h)
-                computeSaliencyAndMotionCentroid(pixelsMid, pixelsStart, w, h, isStartFrame = false)
+                computeSaliencyAndMotionCentroid(
+                    primaryPixels = pixelsMid,
+                    referencePixels = pixelsStart,
+                    w = w,
+                    h = h,
+                    preferRightSide = preferRightSide
+                )
             } else {
                 null
             }
@@ -131,10 +152,10 @@ class SubjectTrackingEngine {
             val midAnchorY = midAnalysis?.centerY ?: ((startAnalysis.centerY + endAnalysis.centerY) * 0.5f)
 
             // Apply temporal smoothing across start, midpoint, end, and previous segment to keep tracking shake-free
-            val rawStartX = startAnalysis.centerX * 0.52f + midAnchorX * 0.24f + prevEndX * 0.24f
-            val rawStartY = startAnalysis.centerY * 0.52f + midAnchorY * 0.24f + prevEndY * 0.24f
-            val rawEndX = endAnalysis.centerX * 0.54f + midAnchorX * 0.26f + rawStartX * 0.20f
-            val rawEndY = endAnalysis.centerY * 0.54f + midAnchorY * 0.26f + rawStartY * 0.20f
+            val rawStartX = startAnalysis.centerX * 0.56f + midAnchorX * 0.24f + prevEndX * 0.20f
+            val rawStartY = startAnalysis.centerY * 0.56f + midAnchorY * 0.24f + prevEndY * 0.20f
+            val rawEndX = endAnalysis.centerX * 0.56f + midAnchorX * 0.26f + rawStartX * 0.18f
+            val rawEndY = endAnalysis.centerY * 0.56f + midAnchorY * 0.26f + rawStartY * 0.18f
 
             val startX = rawStartX.coerceIn(0.24f, 0.76f)
             val startY = rawStartY.coerceIn(0.24f, 0.74f)
@@ -157,8 +178,8 @@ class SubjectTrackingEngine {
                 startCenterY = startY,
                 endCenterX = endX,
                 endCenterY = endY,
-                widthRatio = ((startAnalysis.spreadX + endAnalysis.spreadX) * 0.5f).coerceIn(0.24f, 0.52f),
-                heightRatio = ((startAnalysis.spreadY + endAnalysis.spreadY) * 0.5f).coerceIn(0.28f, 0.58f),
+                widthRatio = ((startAnalysis.spreadX + endAnalysis.spreadX) * 0.5f).coerceIn(0.22f, 0.52f),
+                heightRatio = ((startAnalysis.spreadY + endAnalysis.spreadY) * 0.5f).coerceIn(0.26f, 0.58f),
                 motionMagnitude = motionScore,
                 confidence = startAnalysis.confidence.coerceIn(0.78f, 0.98f),
                 subjectLabel = subjectLabel
@@ -185,11 +206,21 @@ class SubjectTrackingEngine {
         referencePixels: IntArray,
         w: Int,
         h: Int,
-        isStartFrame: Boolean
+        preferRightSide: Boolean
     ): FrameCentroidResult {
         var weightedSumX = 0.0
         var weightedSumY = 0.0
+        var weightedSumX2 = 0.0
+        var weightedSumY2 = 0.0
         var totalWeight = 0.0
+
+        var leftClusterSumX = 0.0
+        var leftClusterSumY = 0.0
+        var leftClusterWeight = 0.0
+        var rightClusterSumX = 0.0
+        var rightClusterSumY = 0.0
+        var rightClusterWeight = 0.0
+
         var motionAccum = 0.0
         var vibrantCount = 0
         var sampleCount = 0
@@ -198,11 +229,11 @@ class SubjectTrackingEngine {
         for (y in 2 until h - 2 step 2) {
             val normY = y.toFloat() / h.toFloat()
             // Center prior prevents HUD corners/watermarks from hijacking tracking
-            val priorY = 1.0f - 0.45f * abs(normY - 0.46f)
+            val priorY = 1.0f - 0.45f * abs(normY - 0.48f)
 
             for (x in 2 until w - 2 step 2) {
                 val normX = x.toFloat() / w.toFloat()
-                val priorX = 1.0f - 0.40f * abs(normX - 0.50f)
+                val priorX = 1.0f - 0.36f * abs(normX - 0.50f)
 
                 val idx = y * w + x
                 val px = primaryPixels[idx]
@@ -230,7 +261,7 @@ class SubjectTrackingEngine {
                     ((pxDown shr 8) and 0xFF) * 0.587f + (pxDown and 0xFF) * 0.114f)
                 val edgeMag = (abs(lumCurr - lumRight) + abs(lumCurr - lumDown)) / 255.0f
 
-                // 3. Chrominance saturation (game characters, faces, subjects stand out from dark/desaturated bg)
+                // 3. Chrominance saturation (game characters, faces, subjects stand out from desaturated bg)
                 val maxC = max(r, max(g, b))
                 val minC = min(r, min(g, b))
                 val saturation = if (maxC > 20) (maxC - minC).toFloat() / maxC.toFloat() else 0f
@@ -244,32 +275,57 @@ class SubjectTrackingEngine {
                 if (weight > 0.05) {
                     weightedSumX += normX * weight
                     weightedSumY += normY * weight
+                    weightedSumX2 += (normX * normX) * weight
+                    weightedSumY2 += (normY * normY) * weight
                     totalWeight += weight
+
+                    if (normX in 0.16f..0.52f && normY in 0.20f..0.82f) {
+                        leftClusterSumX += normX * weight
+                        leftClusterSumY += normY * weight
+                        leftClusterWeight += weight
+                    }
+                    if (normX in 0.48f..0.84f && normY in 0.20f..0.82f) {
+                        rightClusterSumX += normX * weight
+                        rightClusterSumY += normY * weight
+                        rightClusterWeight += weight
+                    }
                 }
                 sampleCount++
             }
         }
 
-        val cx = if (totalWeight > 0.001) (weightedSumX / totalWeight).toFloat() else 0.50f
-        val cy = if (totalWeight > 0.001) (weightedSumY / totalWeight).toFloat() else 0.46f
+        val globalCx = if (totalWeight > 0.001) (weightedSumX / totalWeight).toFloat() else 0.50f
+        val globalCy = if (totalWeight > 0.001) (weightedSumY / totalWeight).toFloat() else 0.48f
 
-        // Compute second moment (bounding box spread around centroid)
-        var varX = 0.0
-        var varY = 0.0
-        if (totalWeight > 0.001) {
-            for (y in 4 until h - 4 step 4) {
-                val normY = y.toFloat() / h.toFloat()
-                for (x in 4 until w - 4 step 4) {
-                    val normX = x.toFloat() / w.toFloat()
-                    val dx = normX - cx
-                    val dy = normY - cy
-                    varX += dx * dx
-                    varY += dy * dy
-                }
+        // In two-character scenes (left & right subjects both have strong saliency), blend toward
+        // the active segment's target subject cluster while preserving single-subject centering
+        val hasDualSubjectClusters = leftClusterWeight > totalWeight * 0.28 && rightClusterWeight > totalWeight * 0.28
+        val (cx, cy) = if (hasDualSubjectClusters) {
+            if (preferRightSide && rightClusterWeight > 0.001) {
+                val rCx = (rightClusterSumX / rightClusterWeight).toFloat()
+                val rCy = (rightClusterSumY / rightClusterWeight).toFloat()
+                (globalCx * 0.45f + rCx * 0.55f) to (globalCy * 0.48f + rCy * 0.52f)
+            } else if (!preferRightSide && leftClusterWeight > 0.001) {
+                val lCx = (leftClusterSumX / leftClusterWeight).toFloat()
+                val lCy = (leftClusterSumY / leftClusterWeight).toFloat()
+                (globalCx * 0.45f + lCx * 0.55f) to (globalCy * 0.48f + lCy * 0.52f)
+            } else {
+                globalCx to globalCy
             }
+        } else {
+            globalCx to globalCy
         }
-        val spreadX = (sqrt(varX / sampleCount.coerceAtLeast(1)).toFloat() * 1.25f).coerceIn(0.26f, 0.48f)
-        val spreadY = (sqrt(varY / sampleCount.coerceAtLeast(1)).toFloat() * 1.25f).coerceIn(0.30f, 0.54f)
+
+        // Compute saliency-weighted second moment (actual foreground subject spread around centroid)
+        val varX = if (totalWeight > 0.001) {
+            max(0.0, (weightedSumX2 / totalWeight) - (globalCx * globalCx).toDouble())
+        } else 0.04
+        val varY = if (totalWeight > 0.001) {
+            max(0.0, (weightedSumY2 / totalWeight) - (globalCy * globalCy).toDouble())
+        } else 0.05
+
+        val spreadX = (sqrt(varX).toFloat() * 1.65f).coerceIn(0.22f, 0.50f)
+        val spreadY = (sqrt(varY).toFloat() * 1.65f).coerceIn(0.26f, 0.54f)
         val avgMotion = (motionAccum / sampleCount.coerceAtLeast(1)).toFloat().coerceIn(0.04f, 0.90f)
         val vibrantRatio = vibrantCount.toFloat() / sampleCount.coerceAtLeast(1).toFloat()
         val conf = (0.80f + min(0.18f, avgMotion * 0.5f + vibrantRatio * 0.2f))

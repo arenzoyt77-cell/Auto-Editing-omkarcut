@@ -117,11 +117,12 @@ data class SubjectRegion(
 }
 
 data class CameraKeyframe(
-    val normalizedTime: Float, // 0.0f for Keyframe A, 1.0f for Keyframe B
+    val normalizedTime: Float, // 0.0f for Keyframe A, 1.0f for Keyframe B / End
     val zoom: Float,           // e.g. 1.00f -> 1.14f
     val focusX: Float,         // Normalized crop center X [0f..1f]
     val focusY: Float,         // Normalized crop center Y [0f..1f]
-    val label: String          // "KEYFRAME A" or "KEYFRAME B"
+    val label: String,         // "KEYFRAME A", "KEYFRAME B", or "KEYFRAME END"
+    val timestampMs: Long = 0L
 )
 
 data class CameraTransform(
@@ -157,6 +158,14 @@ data class VideoSegment(
     val zoomPeakTimeMs: Long = startMs + ((endMs - startMs) * 0.34f).toLong(),
     val zoomHoldEndTimeMs: Long = startMs + ((endMs - startMs) * 0.70f).toLong(),
     val zoomEndTimeMs: Long = endMs,
+    val endKeyframe: CameraKeyframe = CameraKeyframe(
+        normalizedTime = 1.0f,
+        zoom = keyframeA.zoom,
+        focusX = keyframeA.focusX,
+        focusY = keyframeA.focusY,
+        label = "KEYFRAME END",
+        timestampMs = endMs
+    ),
     val isModifiedManually: Boolean = false,
     val autoDefaultDirection: CameraDirection = cameraDirection,
     val autoDefaultZoomPeak: Float = smartZoomPeak,
@@ -309,6 +318,7 @@ object SegmentJsonSerializer {
             kfA.put("focusX", seg.keyframeA.focusX.toDouble())
             kfA.put("focusY", seg.keyframeA.focusY.toDouble())
             kfA.put("label", seg.keyframeA.label)
+            kfA.put("timestampMs", seg.keyframeA.timestampMs)
             obj.put("keyframeA", kfA)
 
             // Keyframe B
@@ -318,7 +328,18 @@ object SegmentJsonSerializer {
             kfB.put("focusX", seg.keyframeB.focusX.toDouble())
             kfB.put("focusY", seg.keyframeB.focusY.toDouble())
             kfB.put("label", seg.keyframeB.label)
+            kfB.put("timestampMs", seg.keyframeB.timestampMs)
             obj.put("keyframeB", kfB)
+
+            // End Boundary Keyframe
+            val kfEnd = JSONObject()
+            kfEnd.put("normalizedTime", seg.endKeyframe.normalizedTime.toDouble())
+            kfEnd.put("zoom", seg.endKeyframe.zoom.toDouble())
+            kfEnd.put("focusX", seg.endKeyframe.focusX.toDouble())
+            kfEnd.put("focusY", seg.endKeyframe.focusY.toDouble())
+            kfEnd.put("label", seg.endKeyframe.label)
+            kfEnd.put("timestampMs", seg.endKeyframe.timestampMs)
+            obj.put("endKeyframe", kfEnd)
 
             arr.put(obj)
         }
@@ -335,6 +356,7 @@ object SegmentJsonSerializer {
                 val subjObj = obj.getJSONObject("subjectRegion")
                 val kfAObj = obj.getJSONObject("keyframeA")
                 val kfBObj = obj.getJSONObject("keyframeB")
+                val kfEndObj = obj.optJSONObject("endKeyframe")
                 val dir = try {
                     CameraDirection.valueOf(obj.getString("cameraDirection"))
                 } catch (_: Exception) {
@@ -351,25 +373,47 @@ object SegmentJsonSerializer {
                     confidence = subjObj.getDouble("confidence").toFloat(),
                     subjectLabel = subjObj.optString("subjectLabel", "Primary Subject")
                 )
+                val startMs = obj.getLong("startMs")
+                val endMs = obj.getLong("endMs")
+                val zoomPeak = obj.getDouble("smartZoomPeak").toFloat()
+                val defaultPeakTimeMs = startMs + ((endMs - startMs) * 0.34f).toLong()
+                val defaultHoldEndTimeMs = startMs + ((endMs - startMs) * 0.70f).toLong()
+                val resolvedPeakTimeMs = obj.optLong("zoomPeakTimeMs", defaultPeakTimeMs)
                 val kfA = CameraKeyframe(
                     normalizedTime = kfAObj.getDouble("normalizedTime").toFloat(),
                     zoom = kfAObj.getDouble("zoom").toFloat(),
                     focusX = kfAObj.getDouble("focusX").toFloat(),
                     focusY = kfAObj.getDouble("focusY").toFloat(),
-                    label = kfAObj.optString("label", "KEYFRAME A")
+                    label = kfAObj.optString("label", "KEYFRAME A"),
+                    timestampMs = kfAObj.optLong("timestampMs", startMs)
                 )
                 val kfB = CameraKeyframe(
                     normalizedTime = kfBObj.getDouble("normalizedTime").toFloat(),
                     zoom = kfBObj.getDouble("zoom").toFloat(),
                     focusX = kfBObj.getDouble("focusX").toFloat(),
                     focusY = kfBObj.getDouble("focusY").toFloat(),
-                    label = kfBObj.optString("label", "KEYFRAME B")
+                    label = kfBObj.optString("label", "KEYFRAME B"),
+                    timestampMs = kfBObj.optLong("timestampMs", resolvedPeakTimeMs)
                 )
-                val startMs = obj.getLong("startMs")
-                val endMs = obj.getLong("endMs")
-                val zoomPeak = obj.getDouble("smartZoomPeak").toFloat()
-                val defaultPeakTimeMs = startMs + ((endMs - startMs) * 0.34f).toLong()
-                val defaultHoldEndTimeMs = startMs + ((endMs - startMs) * 0.70f).toLong()
+                val kfEnd = if (kfEndObj != null) {
+                    CameraKeyframe(
+                        normalizedTime = kfEndObj.optDouble("normalizedTime", 1.0).toFloat(),
+                        zoom = kfEndObj.optDouble("zoom", kfA.zoom.toDouble()).toFloat(),
+                        focusX = kfEndObj.optDouble("focusX", kfA.focusX.toDouble()).toFloat(),
+                        focusY = kfEndObj.optDouble("focusY", kfA.focusY.toDouble()).toFloat(),
+                        label = kfEndObj.optString("label", "KEYFRAME END"),
+                        timestampMs = kfEndObj.optLong("timestampMs", endMs)
+                    )
+                } else {
+                    CameraKeyframe(
+                        normalizedTime = 1.0f,
+                        zoom = kfA.zoom,
+                        focusX = kfA.focusX,
+                        focusY = kfA.focusY,
+                        label = "KEYFRAME END",
+                        timestampMs = endMs
+                    )
+                }
                 list.add(
                     VideoSegment(
                         id = obj.getInt("id"),
@@ -385,9 +429,10 @@ object SegmentJsonSerializer {
                         keyframeB = kfB,
                         smartZoomPeak = zoomPeak,
                         zoomStartTimeMs = obj.optLong("zoomStartTimeMs", startMs),
-                        zoomPeakTimeMs = obj.optLong("zoomPeakTimeMs", defaultPeakTimeMs),
+                        zoomPeakTimeMs = resolvedPeakTimeMs,
                         zoomHoldEndTimeMs = obj.optLong("zoomHoldEndTimeMs", defaultHoldEndTimeMs),
                         zoomEndTimeMs = obj.optLong("zoomEndTimeMs", endMs),
+                        endKeyframe = kfEnd,
                         isModifiedManually = obj.optBoolean("isModifiedManually", false),
                         autoDefaultDirection = if (i % 2 == 0) CameraDirection.RIGHT else CameraDirection.LEFT,
                         autoDefaultZoomPeak = zoomPeak,

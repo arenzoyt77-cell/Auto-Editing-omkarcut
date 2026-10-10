@@ -1031,7 +1031,11 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                 hasAudio = true,
                 mimeType = "video/mp4"
             )
-            val segments = SegmentJsonSerializer.fromJson(project.segmentsJson)
+            val rawLoadedSegments = SegmentJsonSerializer.fromJson(project.segmentsJson)
+            val segments = keyframeEngine.synchronizeConsecutiveBoundaryKeyframes(
+                segments = rawLoadedSegments,
+                keepSubjectInSafeZone = configState.value.keepSubjectInSafeZone
+            )
             val thumbs = videoAnalysisEngine.extractTimelineThumbnails(
                 videoPath = project.localVideoPath,
                 durationMs = project.durationMs,
@@ -1066,8 +1070,12 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun commitUpdatedSegments(updatedList: List<VideoSegment>) {
-        _uiState.update { it.copy(segments = updatedList) }
-        persistCurrentSegmentsAsync(updatedList)
+        val syncedList = keyframeEngine.synchronizeConsecutiveBoundaryKeyframes(
+            segments = updatedList,
+            keepSubjectInSafeZone = configState.value.keepSubjectInSafeZone
+        )
+        _uiState.update { it.copy(segments = syncedList) }
+        persistCurrentSegmentsAsync(syncedList)
     }
 
     private fun persistCurrentSegmentsAsync(segments: List<VideoSegment>) {

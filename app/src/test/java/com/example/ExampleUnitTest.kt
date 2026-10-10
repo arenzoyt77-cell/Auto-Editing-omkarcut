@@ -252,6 +252,92 @@ class ExampleUnitTest {
     }
 
     @Test
+    fun referenceMatchedKeyframes_firstAndLastBoundaryContinuity_adaptiveZoom_andPreviewExportParity() {
+        val engine = KeyframeEditingEngine()
+        // Simulate reference-style multi-turn dialogue with varying durations, vocal energy, and left/right subjects
+        val rawSegments = listOf(
+            RawSpeechSegment(0L, 2100L, "FEMALE: \"Are ruko!\"", 0.90f, -8f, SpeakerIdentity.FEMALE),
+            RawSpeechSegment(2100L, 4200L, "FEMALE: \"Are merko headshot mat marna\"", 0.95f, -4f, SpeakerIdentity.FEMALE),
+            RawSpeechSegment(4200L, 7800L, "MALE: \"Headshot humko nahi aata hum tukka shot maarte hain\"", 0.93f, -5f, SpeakerIdentity.MALE),
+            RawSpeechSegment(7800L, 11400L, "MALE: \"Main toh marunga, Jaggu dada bolenge...\"", 0.96f, -3f, SpeakerIdentity.MALE),
+            RawSpeechSegment(11400L, 13400L, "FEMALE: \"Are meri minus lag jayegi\"", 0.89f, -7f, SpeakerIdentity.FEMALE)
+        )
+        val subjects = listOf(
+            SubjectRegion(0.54f, 0.46f, 0.56f, 0.46f, 0.38f, 0.44f, 0.14f, 0.91f),
+            SubjectRegion(0.58f, 0.45f, 0.62f, 0.46f, 0.28f, 0.38f, 0.12f, 0.95f),
+            SubjectRegion(0.42f, 0.52f, 0.39f, 0.53f, 0.32f, 0.42f, 0.18f, 0.93f),
+            SubjectRegion(0.38f, 0.54f, 0.36f, 0.54f, 0.26f, 0.36f, 0.10f, 0.96f),
+            SubjectRegion(0.56f, 0.46f, 0.54f, 0.47f, 0.36f, 0.44f, 0.16f, 0.90f)
+        )
+
+        val timeline = engine.generateSegmentedTimeline(
+            rawSegments = rawSegments,
+            subjectRegions = subjects,
+            config = AutoCutConfig()
+        )
+
+        // 1. Adaptive zoom & timing: segments must NOT all share one fixed zoom or identical normalized peak time
+        val distinctZooms = timeline.map { (it.smartZoomPeak * 1000).toInt() }.toSet()
+        assertTrue("Adaptive camera framing must vary zoom across different segments", distinctZooms.size >= 3)
+
+        // 2. First and last boundary keyframes exist at exact segment startMs and endMs and match across contiguous splits
+        for (i in timeline.indices) {
+            val seg = timeline[i]
+            assertEquals("First keyframe timestamp must equal segment startMs", seg.startMs, seg.keyframeA.timestampMs)
+            assertEquals("Final keyframe timestamp must equal segment endMs", seg.endMs, seg.endKeyframe.timestampMs)
+            assertEquals(0.0f, seg.keyframeA.normalizedTime, 1e-4f)
+            assertEquals(1.0f, seg.endKeyframe.normalizedTime, 1e-4f)
+
+            if (i < timeline.size - 1) {
+                val nextSeg = timeline[i + 1]
+                assertEquals("Contiguous split zoom must match", seg.endKeyframe.zoom, nextSeg.keyframeA.zoom, 1e-4f)
+                assertEquals("Contiguous split focusX must match", seg.endKeyframe.focusX, nextSeg.keyframeA.focusX, 1e-4f)
+                assertEquals("Contiguous split focusY must match", seg.endKeyframe.focusY, nextSeg.keyframeA.focusY, 1e-4f)
+
+                // Verify consecutive frames right across the split boundary have zero jump
+                val frameUs = 33_333L
+                val beforeSplit = engine.evaluateTransformAtUs(timeline, seg.endMs * 1000L - frameUs, EasingType.CUBIC_HERMITE, i)
+                val atSplitEnd = engine.evaluateTransformAtUs(timeline, seg.endMs * 1000L, EasingType.CUBIC_HERMITE, i)
+                val atSplitStart = engine.evaluateTransformAtUs(timeline, nextSeg.startMs * 1000L, EasingType.CUBIC_HERMITE, i + 1)
+                val afterSplit = engine.evaluateTransformAtUs(timeline, nextSeg.startMs * 1000L + frameUs, EasingType.CUBIC_HERMITE, i + 1)
+
+                assertEquals("End of seg i and start of seg i+1 must have identical zoom", atSplitEnd.zoom, atSplitStart.zoom, 1e-4f)
+                assertEquals("End of seg i and start of seg i+1 must have identical focusX", atSplitEnd.focusX, atSplitStart.focusX, 1e-4f)
+                assertEquals("End of seg i and start of seg i+1 must have identical focusY", atSplitEnd.focusY, atSplitStart.focusY, 1e-4f)
+                assertTrue("Frame before split to split must be smooth", abs(atSplitStart.zoom - beforeSplit.zoom) < 0.005f)
+                assertTrue("Split to frame after split must be smooth", abs(afterSplit.zoom - atSplitStart.zoom) < 0.005f)
+            }
+
+            // 3. Preview vs Export parity across every frame of the segment
+            var tUs = seg.startMs * 1000L
+            while (tUs < seg.endMs * 1000L) {
+                val previewTransform = engine.evaluateTransformAtUs(timeline, tUs, EasingType.CUBIC_HERMITE)
+                val exportTransform = engine.evaluateTransformAtUs(timeline, tUs, EasingType.CUBIC_HERMITE, segmentIndexHint = i)
+                assertEquals(previewTransform.zoom, exportTransform.zoom, 1e-5f)
+                assertEquals(previewTransform.focusX, exportTransform.focusX, 1e-5f)
+                assertEquals(previewTransform.focusY, exportTransform.focusY, 1e-5f)
+                tUs += 33_333L
+            }
+        }
+
+        // 4. Verify non-1.00x shared boundary keyframe preservation & continuity across splits
+        val modifiedSecondSeg = engine.rebuildSegmentKeyframes(
+            segment = timeline[1],
+            newStartZoom = 1.05f,
+            newPeakZoom = 1.14f
+        )
+        val updatedTimeline = engine.synchronizeConsecutiveBoundaryKeyframes(
+            timeline.toMutableList().apply { this[1] = modifiedSecondSeg }
+        )
+        assertEquals("Previous segment endKeyframe zoom must sync with next segment startZoom", 1.05f, updatedTimeline[0].endKeyframe.zoom, 1e-4f)
+        val seg0EndEval = engine.evaluateTransformAtUs(updatedTimeline, updatedTimeline[0].endMs * 1000L, EasingType.CUBIC_HERMITE, 0)
+        val seg1StartEval = engine.evaluateTransformAtUs(updatedTimeline, updatedTimeline[1].startMs * 1000L, EasingType.CUBIC_HERMITE, 1)
+        assertEquals(1.05f, seg0EndEval.zoom, 1e-4f)
+        assertEquals(seg0EndEval.zoom, seg1StartEval.zoom, 1e-4f)
+        assertEquals(seg0EndEval.focusX, seg1StartEval.focusX, 1e-4f)
+    }
+
+    @Test
     fun exportResolutionAndBitrate_follow1080pDefault_noLowResUpscaling_andOptimalBitrate() {
         // Low-res 544x960 must NOT be upscaled
         val (lowW, lowH) = VideoRenderingEngine.computeSafeEncoderDimensions(544, 960, preferOriginal4k = false)
