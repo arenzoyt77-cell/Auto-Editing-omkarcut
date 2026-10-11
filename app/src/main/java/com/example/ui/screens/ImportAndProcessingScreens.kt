@@ -317,15 +317,24 @@ fun ImportInspectScreen(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = "AUTOCUT PIPELINE CONFIGURATION",
+                    text = "AUTOCUT PIPELINE CONFIGURATION (FINAL PRIORITY RULE)",
                     style = MaterialTheme.typography.labelMedium,
                     color = ElectricCyan
                 )
+                val splitGroupsCount = config.suppliedSplitTranscript
+                    .split(Regex("""\(\s*split\s*\)""", RegexOption.IGNORE_CASE))
+                    .map { it.trim() }
+                    .count { it.isNotEmpty() }
+                val timingStatusText = if (config.exactKeyframeTimestampsMs.size >= 3) {
+                    "Explicit Reference Timing: ${config.exactKeyframeTimestampsMs.take(3).joinToString("ms → ")}ms"
+                } else {
+                    "Reference Timing Limitation: Exact keyframe timestamps not supplied in project data (no timestamps invented; configure in Settings if available)"
+                }
                 Text(
-                    text = "• Speech Boundary Split: Min Segment ${String.format(Locale.US, "%.2fs", config.minSegmentDurationMs / 1000f)} (Phrase Endings)\n" +
-                        "• Subject Tracking: Optical Flow + Saliency Centroid Stabilization\n" +
-                        "• Alternating Camera Pattern: RIGHT → LEFT → RIGHT → LEFT\n" +
-                        "• Smart Zoom Range: 1.00x → ${String.format(Locale.US, "%.2fx–%.2fx", config.targetZoomMin, config.targetZoomMax)} (${config.easingType.displayName})",
+                    text = "• Step 1 — Sentence-Wise (split) Grouping: ${if (splitGroupsCount > 0) "$splitGroupsCount marked spoken groups preserved intact" else "Audio Speech Boundary Detection"}\n" +
+                        "• Step 2 — Fixed Presets by Clip Index: Clip 1 RIGHT (X -87, Y +18, Zoom 117%) ↔ Clip 2 LEFT (X +43, Y -14, Zoom 108%)\n" +
+                        "• Step 3 — Exact 3 Keyframes: KF1 (X +5, Y -1, 101%) → KF2 (X +179, Y -58, 142%) → KF3 (X -160, Y -102, 140%)\n" +
+                        "• Step 4 — $timingStatusText",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )

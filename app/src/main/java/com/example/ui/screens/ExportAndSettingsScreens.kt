@@ -40,6 +40,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
@@ -683,6 +684,145 @@ fun StudioSettingsScreen(
                         text = "Configure Speech Split, Smart Zoom & Tracking Parameters",
                         style = MaterialTheme.typography.bodySmall,
                         color = ElectricCyan
+                    )
+                }
+            }
+
+            // 0. FINAL PRIORITY RULE — EXACT SETTINGS (Supplied (split) Transcript + Fixed Presets + Exact Keyframes + Timing)
+            SettingsCard(
+                title = "FINAL PRIORITY RULE — EXACT SETTINGS",
+                subtitle = "Enforces exact (split) sentence boundaries, fixed chronological RIGHT/LEFT presets, and exact 3-keyframe sequence (KF1 → KF2 → KF3).",
+                badge = if (config.enforceExactKeyframeSettings) "EXACT LOCKED" else "ADAPTIVE"
+            ) {
+                var timingInput by remember(config.exactKeyframeTimestampsMs) {
+                    mutableStateOf(config.exactKeyframeTimestampsMs.joinToString(", "))
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Enforce Exact Presets & 3-Keyframe Sequence",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "RIGHT (X -87, Y +18, 117%) ↔ LEFT (X +43, Y -14, 108%) + KF1 (+5, -1, 101%) → KF2 (+179, -58, 142%) → KF3 (-160, -102, 140%)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NeonEmerald
+                        )
+                    }
+                    Switch(
+                        checked = config.enforceExactKeyframeSettings,
+                        onCheckedChange = {
+                            onUpdateConfig(config.copy(enforceExactKeyframeSettings = it))
+                        },
+                        colors = SwitchDefaults.colors(checkedThumbColor = NeonEmerald)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Supplied Transcript with (split) Boundaries:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ElectricCyan
+                )
+                OutlinedTextField(
+                    value = config.suppliedSplitTranscript,
+                    onValueChange = { updatedTranscript ->
+                        onUpdateConfig(config.copy(suppliedSplitTranscript = updatedTranscript))
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("supplied_split_transcript_input"),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(color = TextPrimary),
+                    minLines = 3,
+                    maxLines = 5
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            onUpdateConfig(
+                                config.copy(
+                                    suppliedSplitTranscript = AutoCutConfig.DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT
+                                )
+                            )
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "RESTORE DEFAULT (SPLIT)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ElectricCyan
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            onUpdateConfig(config.copy(suppliedSplitTranscript = ""))
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GlassBorder),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(
+                            text = "USE AUDIO VAD ONLY",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "Reference Keyframe Timestamps (ms, comma-separated for KF1, KF2, KF3):",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = KeyframeAmber
+                )
+                OutlinedTextField(
+                    value = timingInput,
+                    onValueChange = { rawText ->
+                        timingInput = rawText
+                        val parsed = rawText.split(",")
+                            .mapNotNull { it.trim().toLongOrNull() }
+                        onUpdateConfig(
+                            config.copy(
+                                exactKeyframeTimestampsMs = if (parsed.size >= 3) parsed.take(3) else emptyList()
+                            )
+                        )
+                    },
+                    placeholder = {
+                        Text(
+                            text = "Leave blank if reference timing not supplied (e.g. 0, 800, 1600)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextMuted
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("exact_keyframe_timestamps_input"),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(color = TextPrimary),
+                    singleLine = true
+                )
+                if (config.exactKeyframeTimestampsMs.size < 3) {
+                    Text(
+                        text = "Limitation Note: Exact reference keyframe timing is not supplied in project data. Keyframe values (KF1 → KF2 → KF3) are preserved without inventing timestamps. Enter 3 millisecond timestamps above if reference timing is available.",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                        color = KeyframeAmber
                     )
                 }
             }
