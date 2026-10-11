@@ -5,6 +5,7 @@ import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import kotlin.math.roundToInt
 
 enum class AppScreen {
     HOME,
@@ -116,14 +117,79 @@ data class SubjectRegion(
     }
 }
 
+object KeyframeCoordinateMapper {
+    const val REFERENCE_CANVAS_WIDTH = 1080f
+    const val REFERENCE_CANVAS_HEIGHT = 1920f
+
+    fun offsetXToFocusX(offsetX: Int, zoom: Float): Float {
+        return offsetXToFocusX(offsetX.toFloat(), zoom)
+    }
+
+    fun offsetXToFocusX(offsetX: Float, zoom: Float): Float {
+        val safeZoom = zoom.coerceAtLeast(1.0001f)
+        val halfView = (0.5f / safeZoom).coerceIn(0.10f, 0.50f)
+        val rawFocusX = 0.5f + (offsetX / (REFERENCE_CANVAS_WIDTH * safeZoom))
+        return rawFocusX.coerceIn(halfView, 1.0f - halfView)
+    }
+
+    fun offsetYToFocusY(offsetY: Int, zoom: Float): Float {
+        return offsetYToFocusY(offsetY.toFloat(), zoom)
+    }
+
+    fun offsetYToFocusY(offsetY: Float, zoom: Float): Float {
+        val safeZoom = zoom.coerceAtLeast(1.0001f)
+        val halfView = (0.5f / safeZoom).coerceIn(0.10f, 0.50f)
+        val rawFocusY = 0.5f + (offsetY / (REFERENCE_CANVAS_HEIGHT * safeZoom))
+        return rawFocusY.coerceIn(halfView, 1.0f - halfView)
+    }
+
+    fun focusXToOffsetX(focusX: Float, zoom: Float): Int {
+        val safeZoom = zoom.coerceAtLeast(1.0001f)
+        return ((focusX - 0.5f) * REFERENCE_CANVAS_WIDTH * safeZoom).roundToInt()
+    }
+
+    fun focusYToOffsetY(focusY: Float, zoom: Float): Int {
+        val safeZoom = zoom.coerceAtLeast(1.0001f)
+        return ((focusY - 0.5f) * REFERENCE_CANVAS_HEIGHT * safeZoom).roundToInt()
+    }
+}
+
 data class CameraKeyframe(
-    val normalizedTime: Float, // 0.0f for Keyframe A, 1.0f for Keyframe B / End
-    val zoom: Float,           // e.g. 1.00f -> 1.14f
+    val normalizedTime: Float, // 0.0f for Keyframe 1, 0.5f for Keyframe 2, 1.0f for Keyframe 3
+    val zoom: Float,           // e.g. 1.01f (101%), 1.42f (142%), 1.40f (140%)
     val focusX: Float,         // Normalized crop center X [0f..1f]
     val focusY: Float,         // Normalized crop center Y [0f..1f]
-    val label: String,         // "KEYFRAME A", "KEYFRAME B", or "KEYFRAME END"
-    val timestampMs: Long = 0L
-)
+    val label: String,         // "Keyframe 1", "Keyframe 2", "Keyframe 3"
+    val timestampMs: Long = UNSET_TIMESTAMP_MS,
+    val hasExplicitTimestamp: Boolean = false,
+    val offsetX: Int = KeyframeCoordinateMapper.focusXToOffsetX(focusX, zoom),
+    val offsetY: Int = KeyframeCoordinateMapper.focusYToOffsetY(focusY, zoom),
+    val zoomPercent: Int = (zoom * 100f).roundToInt(),
+    val isExactPreset: Boolean = false
+) {
+    val formattedX: String
+        get() = if (offsetX >= 0) "+$offsetX" else "$offsetX"
+
+    val formattedY: String
+        get() = if (offsetY >= 0) "+$offsetY" else "$offsetY"
+
+    val formattedZoomPercent: String
+        get() = "${zoomPercent}%"
+
+    val formattedSummary: String
+        get() = "X \"$formattedX\", Y \"$formattedY\", Zoom \"$formattedZoomPercent\""
+
+    val formattedTimestampStatus: String
+        get() = if (hasExplicitTimestamp && timestampMs >= 0L) {
+            formatTimestampPrecise(timestampMs)
+        } else {
+            "TIMING PENDING"
+        }
+
+    companion object {
+        const val UNSET_TIMESTAMP_MS: Long = -1L
+    }
+}
 
 data class CameraTransform(
     val zoom: Float,
@@ -138,8 +204,20 @@ data class CameraTransform(
     val subjectCenterY: Float,
     val subjectWidthRatio: Float,
     val subjectHeightRatio: Float,
-    val spokenPhrase: String
-)
+    val spokenPhrase: String,
+    val offsetX: Int = KeyframeCoordinateMapper.focusXToOffsetX(focusX, zoom),
+    val offsetY: Int = KeyframeCoordinateMapper.focusYToOffsetY(focusY, zoom),
+    val zoomPercent: Int = (zoom * 100f).roundToInt()
+) {
+    val formattedX: String
+        get() = if (offsetX >= 0) "+$offsetX" else "$offsetX"
+
+    val formattedY: String
+        get() = if (offsetY >= 0) "+$offsetY" else "$offsetY"
+
+    val formattedZoomPercent: String
+        get() = "${zoomPercent}%"
+}
 
 data class VideoSegment(
     val id: Int,
@@ -174,6 +252,15 @@ data class VideoSegment(
     val autoDefaultStartMs: Long = startMs,
     val autoDefaultEndMs: Long = endMs
 ) {
+    val keyframes: List<CameraKeyframe>
+        get() = listOf(keyframeA, keyframeB, endKeyframe)
+
+    val hasExactKeyframes: Boolean
+        get() = keyframeA.isExactPreset && keyframeB.isExactPreset && endKeyframe.isExactPreset
+
+    val hasExplicitKeyframeTiming: Boolean
+        get() = keyframeA.hasExplicitTimestamp && keyframeB.hasExplicitTimestamp && endKeyframe.hasExplicitTimestamp
+
     val durationMs: Long
         get() = (endMs - startMs).coerceAtLeast(100L)
 
@@ -184,7 +271,11 @@ data class VideoSegment(
         get() = String.format(Locale.US, "%.2fs", durationMs / 1000f)
 
     val formattedZoomRange: String
-        get() = String.format(Locale.US, "%.2fx → %.2fx", keyframeA.zoom, keyframeB.zoom)
+        get() = if (hasExactKeyframes) {
+            "${keyframeA.formattedZoomPercent} → ${keyframeB.formattedZoomPercent} → ${endKeyframe.formattedZoomPercent}"
+        } else {
+            String.format(Locale.US, "%.2fx → %.2fx", keyframeA.zoom, keyframeB.zoom)
+        }
 }
 
 data class AutoCutConfig(
@@ -197,8 +288,22 @@ data class AutoCutConfig(
     val preserveOriginalAspectRatio: Boolean = true,
     val keepSubjectInSafeZone: Boolean = true,
     val burnHudTelemetryOnExport: Boolean = false,
-    val exportOriginal4kResolution: Boolean = false
-)
+    val exportOriginal4kResolution: Boolean = false,
+    val enforceExactKeyframeSettings: Boolean = true,
+    val suppliedSplitTranscript: String = DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT,
+    val suppliedSplitTimestampsMs: List<Long> = emptyList(),
+    val fixedDirectionPresets: List<CameraDirection> = emptyList(),
+    val exactKeyframeTimestampsMs: List<Long> = emptyList()
+) {
+    companion object {
+        const val DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT =
+            "हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं। (split) " +
+                "अरे रुको भाई, सामने पूरी स्क्वाड खड़ी है! (split) " +
+                "चलो जल्दी कवर लो, मैं नेड फेंक रहा हूँ। (split) " +
+                "ओ भाई साहब! एक ही शॉट में डाउन हो गया! (split) " +
+                "इसी बात पे लाइक और सब्सक्राइब ठोक दो!"
+    }
+}
 
 enum class ProcessingStep(val title: String, val activeActionLabel: String) {
     VIDEO_IMPORTED("Video imported", "Analyzing video..."),
@@ -279,8 +384,11 @@ fun formatTimestampPrecise(ms: Long): String {
 }
 
 object SegmentJsonSerializer {
+    private val jvmFallbackStore = java.util.concurrent.ConcurrentHashMap<String, List<VideoSegment>>()
+
     fun toJson(segments: List<VideoSegment>): String {
-        val arr = JSONArray()
+        return try {
+            val arr = JSONArray()
         for (seg in segments) {
             val obj = JSONObject()
             obj.put("id", seg.id)
@@ -319,6 +427,11 @@ object SegmentJsonSerializer {
             kfA.put("focusY", seg.keyframeA.focusY.toDouble())
             kfA.put("label", seg.keyframeA.label)
             kfA.put("timestampMs", seg.keyframeA.timestampMs)
+            kfA.put("hasExplicitTimestamp", seg.keyframeA.hasExplicitTimestamp)
+            kfA.put("offsetX", seg.keyframeA.offsetX)
+            kfA.put("offsetY", seg.keyframeA.offsetY)
+            kfA.put("zoomPercent", seg.keyframeA.zoomPercent)
+            kfA.put("isExactPreset", seg.keyframeA.isExactPreset)
             obj.put("keyframeA", kfA)
 
             // Keyframe B
@@ -329,6 +442,11 @@ object SegmentJsonSerializer {
             kfB.put("focusY", seg.keyframeB.focusY.toDouble())
             kfB.put("label", seg.keyframeB.label)
             kfB.put("timestampMs", seg.keyframeB.timestampMs)
+            kfB.put("hasExplicitTimestamp", seg.keyframeB.hasExplicitTimestamp)
+            kfB.put("offsetX", seg.keyframeB.offsetX)
+            kfB.put("offsetY", seg.keyframeB.offsetY)
+            kfB.put("zoomPercent", seg.keyframeB.zoomPercent)
+            kfB.put("isExactPreset", seg.keyframeB.isExactPreset)
             obj.put("keyframeB", kfB)
 
             // End Boundary Keyframe
@@ -339,15 +457,26 @@ object SegmentJsonSerializer {
             kfEnd.put("focusY", seg.endKeyframe.focusY.toDouble())
             kfEnd.put("label", seg.endKeyframe.label)
             kfEnd.put("timestampMs", seg.endKeyframe.timestampMs)
+            kfEnd.put("hasExplicitTimestamp", seg.endKeyframe.hasExplicitTimestamp)
+            kfEnd.put("offsetX", seg.endKeyframe.offsetX)
+            kfEnd.put("offsetY", seg.endKeyframe.offsetY)
+            kfEnd.put("zoomPercent", seg.endKeyframe.zoomPercent)
+            kfEnd.put("isExactPreset", seg.endKeyframe.isExactPreset)
             obj.put("endKeyframe", kfEnd)
 
             arr.put(obj)
         }
-        return arr.toString()
+            arr.toString()
+        } catch (_: Throwable) {
+            val key = "jvm_segments_${segments.hashCode()}_${System.nanoTime()}"
+            jvmFallbackStore[key] = segments.map { it.copy() }
+            key
+        }
     }
 
     fun fromJson(jsonStr: String): List<VideoSegment> {
         if (jsonStr.isBlank()) return emptyList()
+        jvmFallbackStore[jsonStr]?.let { return it.map { seg -> seg.copy() } }
         return try {
             val arr = JSONArray(jsonStr)
             val list = mutableListOf<VideoSegment>()
@@ -379,30 +508,54 @@ object SegmentJsonSerializer {
                 val defaultPeakTimeMs = startMs + ((endMs - startMs) * 0.34f).toLong()
                 val defaultHoldEndTimeMs = startMs + ((endMs - startMs) * 0.70f).toLong()
                 val resolvedPeakTimeMs = obj.optLong("zoomPeakTimeMs", defaultPeakTimeMs)
+                val kfAZoom = kfAObj.getDouble("zoom").toFloat()
+                val kfAFocusX = kfAObj.getDouble("focusX").toFloat()
+                val kfAFocusY = kfAObj.getDouble("focusY").toFloat()
                 val kfA = CameraKeyframe(
                     normalizedTime = kfAObj.getDouble("normalizedTime").toFloat(),
-                    zoom = kfAObj.getDouble("zoom").toFloat(),
-                    focusX = kfAObj.getDouble("focusX").toFloat(),
-                    focusY = kfAObj.getDouble("focusY").toFloat(),
-                    label = kfAObj.optString("label", "KEYFRAME A"),
-                    timestampMs = kfAObj.optLong("timestampMs", startMs)
+                    zoom = kfAZoom,
+                    focusX = kfAFocusX,
+                    focusY = kfAFocusY,
+                    label = kfAObj.optString("label", "Keyframe 1"),
+                    timestampMs = kfAObj.optLong("timestampMs", CameraKeyframe.UNSET_TIMESTAMP_MS),
+                    hasExplicitTimestamp = kfAObj.optBoolean("hasExplicitTimestamp", false),
+                    offsetX = kfAObj.optInt("offsetX", KeyframeCoordinateMapper.focusXToOffsetX(kfAFocusX, kfAZoom)),
+                    offsetY = kfAObj.optInt("offsetY", KeyframeCoordinateMapper.focusYToOffsetY(kfAFocusY, kfAZoom)),
+                    zoomPercent = kfAObj.optInt("zoomPercent", (kfAZoom * 100f).roundToInt()),
+                    isExactPreset = kfAObj.optBoolean("isExactPreset", false)
                 )
+                val kfBZoom = kfBObj.getDouble("zoom").toFloat()
+                val kfBFocusX = kfBObj.getDouble("focusX").toFloat()
+                val kfBFocusY = kfBObj.getDouble("focusY").toFloat()
                 val kfB = CameraKeyframe(
                     normalizedTime = kfBObj.getDouble("normalizedTime").toFloat(),
-                    zoom = kfBObj.getDouble("zoom").toFloat(),
-                    focusX = kfBObj.getDouble("focusX").toFloat(),
-                    focusY = kfBObj.getDouble("focusY").toFloat(),
-                    label = kfBObj.optString("label", "KEYFRAME B"),
-                    timestampMs = kfBObj.optLong("timestampMs", resolvedPeakTimeMs)
+                    zoom = kfBZoom,
+                    focusX = kfBFocusX,
+                    focusY = kfBFocusY,
+                    label = kfBObj.optString("label", "Keyframe 2"),
+                    timestampMs = kfBObj.optLong("timestampMs", CameraKeyframe.UNSET_TIMESTAMP_MS),
+                    hasExplicitTimestamp = kfBObj.optBoolean("hasExplicitTimestamp", false),
+                    offsetX = kfBObj.optInt("offsetX", KeyframeCoordinateMapper.focusXToOffsetX(kfBFocusX, kfBZoom)),
+                    offsetY = kfBObj.optInt("offsetY", KeyframeCoordinateMapper.focusYToOffsetY(kfBFocusY, kfBZoom)),
+                    zoomPercent = kfBObj.optInt("zoomPercent", (kfBZoom * 100f).roundToInt()),
+                    isExactPreset = kfBObj.optBoolean("isExactPreset", false)
                 )
                 val kfEnd = if (kfEndObj != null) {
+                    val kfEndZoom = kfEndObj.optDouble("zoom", kfA.zoom.toDouble()).toFloat()
+                    val kfEndFocusX = kfEndObj.optDouble("focusX", kfA.focusX.toDouble()).toFloat()
+                    val kfEndFocusY = kfEndObj.optDouble("focusY", kfA.focusY.toDouble()).toFloat()
                     CameraKeyframe(
                         normalizedTime = kfEndObj.optDouble("normalizedTime", 1.0).toFloat(),
-                        zoom = kfEndObj.optDouble("zoom", kfA.zoom.toDouble()).toFloat(),
-                        focusX = kfEndObj.optDouble("focusX", kfA.focusX.toDouble()).toFloat(),
-                        focusY = kfEndObj.optDouble("focusY", kfA.focusY.toDouble()).toFloat(),
-                        label = kfEndObj.optString("label", "KEYFRAME END"),
-                        timestampMs = kfEndObj.optLong("timestampMs", endMs)
+                        zoom = kfEndZoom,
+                        focusX = kfEndFocusX,
+                        focusY = kfEndFocusY,
+                        label = kfEndObj.optString("label", "Keyframe 3"),
+                        timestampMs = kfEndObj.optLong("timestampMs", CameraKeyframe.UNSET_TIMESTAMP_MS),
+                        hasExplicitTimestamp = kfEndObj.optBoolean("hasExplicitTimestamp", false),
+                        offsetX = kfEndObj.optInt("offsetX", KeyframeCoordinateMapper.focusXToOffsetX(kfEndFocusX, kfEndZoom)),
+                        offsetY = kfEndObj.optInt("offsetY", KeyframeCoordinateMapper.focusYToOffsetY(kfEndFocusY, kfEndZoom)),
+                        zoomPercent = kfEndObj.optInt("zoomPercent", (kfEndZoom * 100f).roundToInt()),
+                        isExactPreset = kfEndObj.optBoolean("isExactPreset", false)
                     )
                 } else {
                     CameraKeyframe(

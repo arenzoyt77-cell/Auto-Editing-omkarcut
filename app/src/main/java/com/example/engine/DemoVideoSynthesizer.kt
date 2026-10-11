@@ -51,72 +51,74 @@ class DemoVideoSynthesizer(private val context: Context) {
     // Notice how Turn 1 (MALE) and Turn 3 (MALE) have internal sentence/clause pauses (180ms-240ms)
     // so the speech engine proves it merges same-speaker clauses into ONE complete turn!
     private val vocalBursts = listOf(
-        // MALE Turn 1 (0.15s .. 2.75s) -> two sub-clauses separated by a short 180ms comma pause
+        // Group 1 (0.12s .. 2.35s) -> two sentences kept together in ONE clip ("हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं।")
         VocalBurstSpec(
-            startSec = 0.15f,
-            endSec = 1.25f,
-            speakerTag = "MALE TURN 1",
-            captionText = "MALE: \"Aare ruko, tum kaha ja rahe ho?\"",
+            startSec = 0.12f,
+            endSec = 1.15f,
+            speakerTag = "CLIP 1 • RIGHT",
+            captionText = "हेडशॉट हमको नहीं आता।",
             targetSubjectX = 0.62f,
             targetSubjectY = 0.46f,
             pitchHz = 128f,
             upperFormantBoost = 0.22f
         ),
         VocalBurstSpec(
-            startSec = 1.43f,
-            endSec = 2.75f,
-            speakerTag = "MALE TURN 1",
-            captionText = "MALE: \"Pehle meri baat suno.\"",
+            startSec = 1.30f,
+            endSec = 2.35f,
+            speakerTag = "CLIP 1 • RIGHT",
+            captionText = "हम तुक्का शॉट मारते हैं।",
             targetSubjectX = 0.60f,
             targetSubjectY = 0.46f,
             pitchHz = 132f,
             upperFormantBoost = 0.22f
         ),
 
-        // FEMALE Turn 2 (3.20s .. 5.10s) -> distinct female voice (236 Hz)
+        // Group 2 (2.75s .. 4.45s) -> after 1st (split)
         VocalBurstSpec(
-            startSec = 3.20f,
-            endSec = 5.10f,
-            speakerTag = "FEMALE TURN 2",
-            captionText = "FEMALE: \"Achha batao, kya hua?\"",
+            startSec = 2.75f,
+            endSec = 4.45f,
+            speakerTag = "CLIP 2 • LEFT",
+            captionText = "अरे रुको भाई, सामने पूरी स्क्वाड खड़ी है!",
             targetSubjectX = 0.36f,
             targetSubjectY = 0.44f,
             pitchHz = 236f,
             upperFormantBoost = 0.72f
         ),
 
-        // MALE Turn 3 (5.55s .. 8.35s) -> three continuous sentences by Male kept as ONE segment
+        // Group 3 (4.85s .. 6.55s) -> after 2nd (split)
         VocalBurstSpec(
-            startSec = 5.55f,
-            endSec = 6.75f,
-            speakerTag = "MALE TURN 3",
-            captionText = "MALE: \"Ruko. Tum idhar aao.\"",
+            startSec = 4.85f,
+            endSec = 6.55f,
+            speakerTag = "CLIP 3 • RIGHT",
+            captionText = "चलो जल्दी कवर लो, मैं नेड फेंक रहा हूँ।",
             targetSubjectX = 0.64f,
             targetSubjectY = 0.48f,
             pitchHz = 130f,
             upperFormantBoost = 0.24f
         ),
+
+        // Group 4 (6.95s .. 8.65s) -> after 3rd (split)
         VocalBurstSpec(
             startSec = 6.95f,
-            endSec = 8.35f,
-            speakerTag = "MALE TURN 3",
-            captionText = "MALE: \"Mujhe ek important baat karni hai.\"",
+            endSec = 8.65f,
+            speakerTag = "CLIP 4 • LEFT",
+            captionText = "ओ भाई साहब! एक ही शॉट में डाउन हो गया!",
+            targetSubjectX = 0.38f,
+            targetSubjectY = 0.45f,
+            pitchHz = 240f,
+            upperFormantBoost = 0.74f
+        ),
+
+        // Group 5 (9.05s .. 10.80s) -> after 4th (split)
+        VocalBurstSpec(
+            startSec = 9.05f,
+            endSec = 10.80f,
+            speakerTag = "CLIP 5 • RIGHT",
+            captionText = "इसी बात पे लाइक और सब्सक्राइब ठोक दो!",
             targetSubjectX = 0.61f,
             targetSubjectY = 0.47f,
             pitchHz = 134f,
-            upperFormantBoost = 0.24f
-        ),
-
-        // FEMALE Turn 4 (8.80s .. 10.80s) -> distinct female response (242 Hz)
-        VocalBurstSpec(
-            startSec = 8.80f,
-            endSec = 10.80f,
-            speakerTag = "FEMALE TURN 4",
-            captionText = "FEMALE: \"Theek hai, main sun rahi hoon!\"",
-            targetSubjectX = 0.38f,
-            targetSubjectY = 0.45f,
-            pitchHz = 242f,
-            upperFormantBoost = 0.75f
+            upperFormantBoost = 0.25f
         )
     )
 
@@ -124,7 +126,7 @@ class DemoVideoSynthesizer(private val context: Context) {
         onProgress: suspend (String) -> Unit
     ): Uri? = withContext(Dispatchers.IO) {
         val demoDir = File(context.filesDir, "demo_videos").apply { mkdirs() }
-        val outputFile = File(demoDir, "omkar_demo_speaker_turns.mp4")
+        val outputFile = File(demoDir, "omkar_demo_exact_splits_v2.mp4")
         if (outputFile.exists() && outputFile.length() > 20_000L) {
             return@withContext Uri.fromFile(outputFile)
         }

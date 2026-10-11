@@ -25,6 +25,9 @@ class AutoCutPreferences(private val context: Context) {
         private val KEY_SAFE_ZONE = booleanPreferencesKey("keep_subject_safe_zone")
         private val KEY_BURN_HUD = booleanPreferencesKey("burn_hud_telemetry")
         private val KEY_EXPORT_ORIGINAL_4K = booleanPreferencesKey("export_original_4k_resolution")
+        private val KEY_ENFORCE_EXACT_KEYFRAMES = booleanPreferencesKey("enforce_exact_keyframe_settings")
+        private val KEY_SUPPLIED_SPLIT_TRANSCRIPT = stringPreferencesKey("supplied_split_transcript")
+        private val KEY_EXACT_KEYFRAME_TIMESTAMPS = stringPreferencesKey("exact_keyframe_timestamps_ms")
     }
 
     val configFlow: Flow<AutoCutConfig> = context.dataStore.data.map { prefs ->
@@ -34,17 +37,25 @@ class AutoCutPreferences(private val context: Context) {
         } catch (_: Exception) {
             EasingType.CUBIC_HERMITE
         }
+        val parsedTimestamps = prefs[KEY_EXACT_KEYFRAME_TIMESTAMPS]
+            ?.split(",")
+            ?.mapNotNull { it.trim().toLongOrNull() }
+            ?: emptyList()
         AutoCutConfig(
             minSegmentDurationMs = prefs[KEY_MIN_SEGMENT_MS] ?: 650L,
             minZoom = 1.00f,
             targetZoomMin = prefs[KEY_TARGET_ZOOM_MIN] ?: 1.08f,
-            targetZoomMax = prefs[KEY_TARGET_ZOOM_MAX] ?: 1.18f,
+            targetZoomMax = prefs[KEY_TARGET_ZOOM_MAX] ?: 1.15f,
             speechSensitivity = prefs[KEY_SPEECH_SENSITIVITY] ?: 0.65f,
             easingType = easing,
             preserveOriginalAspectRatio = prefs[KEY_PRESERVE_ASPECT] ?: true,
             keepSubjectInSafeZone = prefs[KEY_SAFE_ZONE] ?: true,
             burnHudTelemetryOnExport = prefs[KEY_BURN_HUD] ?: false,
-            exportOriginal4kResolution = prefs[KEY_EXPORT_ORIGINAL_4K] ?: false
+            exportOriginal4kResolution = prefs[KEY_EXPORT_ORIGINAL_4K] ?: false,
+            enforceExactKeyframeSettings = prefs[KEY_ENFORCE_EXACT_KEYFRAMES] ?: true,
+            suppliedSplitTranscript = prefs[KEY_SUPPLIED_SPLIT_TRANSCRIPT]
+                ?: AutoCutConfig.DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT,
+            exactKeyframeTimestampsMs = parsedTimestamps
         )
     }
 
@@ -59,6 +70,9 @@ class AutoCutPreferences(private val context: Context) {
             prefs[KEY_SAFE_ZONE] = config.keepSubjectInSafeZone
             prefs[KEY_BURN_HUD] = config.burnHudTelemetryOnExport
             prefs[KEY_EXPORT_ORIGINAL_4K] = config.exportOriginal4kResolution
+            prefs[KEY_ENFORCE_EXACT_KEYFRAMES] = config.enforceExactKeyframeSettings
+            prefs[KEY_SUPPLIED_SPLIT_TRANSCRIPT] = config.suppliedSplitTranscript
+            prefs[KEY_EXACT_KEYFRAME_TIMESTAMPS] = config.exactKeyframeTimestampsMs.joinToString(",")
         }
     }
 }

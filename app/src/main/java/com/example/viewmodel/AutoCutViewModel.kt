@@ -61,7 +61,8 @@ data class AutoCutUiState(
     val exportState: ExportProgressState = ExportProgressState(),
     val activeBannerError: AutoCutError? = null,
     val currentProjectId: Long? = null,
-    val showInAppExportPlayerModal: Boolean = false
+    val showInAppExportPlayerModal: Boolean = false,
+    val exactSettingsValidation: KeyframeEditingEngine.ExactSettingsValidationReport? = null
 )
 
 class AutoCutViewModel(application: Application) : AndroidViewModel(application) {
@@ -393,11 +394,15 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
             }
             delay(180L)
 
-            // Step 6 & 7: Alternating Camera Direction + Keyframe A/B + Smart Zoom
+            // Step 6 & 7: Alternating Camera Direction + Keyframe Sequence
             val generatedSegments = keyframeEngine.generateSegmentedTimeline(
                 rawSegments = speechResult.segments,
                 subjectRegions = subjectRegions,
                 config = config
+            )
+            val validationReport = keyframeEngine.validateClipAndKeyframeSettings(
+                segments = generatedSegments,
+                expectedPresetSequence = config.fixedDirectionPresets
             )
 
             completed.add(ProcessingStep.CAMERA_MOVEMENTS_CREATED)
@@ -409,7 +414,7 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                         currentStepIndex = 7,
                         completedSteps = completed.toSet(),
                         progressPercent = 95,
-                        statusDetail = "Finalizing timeline keyframes & smart zoom...",
+                        statusDetail = "Validating exact clip presets & keyframe sequence...",
                         estimatedRemainingSeconds = 1
                     )
                 )
@@ -435,6 +440,7 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                     currentPlaybackPositionMs = generatedSegments.firstOrNull()?.startMs ?: 0L,
                     isPlayingPreview = true,
                     currentProjectId = savedProjectId,
+                    exactSettingsValidation = validationReport,
                     activeBannerError = speechResult.speechDetectedWarning ?: it.activeBannerError,
                     processingState = ProcessingState(
                         isProcessing = false,
@@ -551,8 +557,8 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
 
         val updated = keyframeEngine.rebuildSegmentKeyframes(
             segment = currentList[idx],
-            newStartZoom = startZoom.coerceIn(1.00f, 1.24f),
-            newPeakZoom = peakZoom.coerceIn(1.00f, 1.26f),
+            newStartZoom = startZoom.coerceIn(1.00f, 1.50f),
+            newPeakZoom = peakZoom.coerceIn(1.00f, 1.50f),
             keepSubjectInSafeZone = configState.value.keepSubjectInSafeZone
         )
         currentList[idx] = updated
@@ -672,19 +678,45 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
         if (idx < 0) return
 
         val seg = currentList[idx]
-        val restored = keyframeEngine.rebuildSegmentKeyframes(
-            segment = seg.copy(
+        val cfg = configState.value
+        val fixedDir = KeyframeEditingEngine.fixedDirectionForClipIndex(idx, cfg.fixedDirectionPresets)
+        val restored = if (cfg.enforceExactKeyframeSettings) {
+            val (kf1, kf2, kf3) = KeyframeEditingEngine.buildExactKeyframeSequence(cfg.exactKeyframeTimestampsMs)
+            val midMs = seg.autoDefaultStartMs + ((seg.autoDefaultEndMs - seg.autoDefaultStartMs) / 2L)
+            val resolvedPeakMs = if (kf2.hasExplicitTimestamp) kf2.timestampMs else midMs
+            seg.copy(
                 startMs = seg.autoDefaultStartMs,
                 endMs = seg.autoDefaultEndMs,
+                cameraDirection = fixedDir,
+                keyframeA = kf1,
+                keyframeB = kf2,
+                smartZoomPeak = kf2.zoom,
+                zoomStartTimeMs = if (kf1.hasExplicitTimestamp) kf1.timestampMs else seg.autoDefaultStartMs,
+                zoomPeakTimeMs = resolvedPeakMs,
+                zoomHoldEndTimeMs = resolvedPeakMs,
+                zoomEndTimeMs = if (kf3.hasExplicitTimestamp) kf3.timestampMs else seg.autoDefaultEndMs,
+                endKeyframe = kf3,
+                subjectRegion = seg.subjectRegion.copy(
+                    startCenterX = seg.autoDefaultSubjectX,
+                    startCenterY = seg.autoDefaultSubjectY
+                ),
                 isModifiedManually = false
-            ),
-            newDirection = seg.autoDefaultDirection,
-            newStartZoom = 1.00f,
-            newPeakZoom = seg.autoDefaultZoomPeak,
-            newSubjectX = seg.autoDefaultSubjectX,
-            newSubjectY = seg.autoDefaultSubjectY,
-            keepSubjectInSafeZone = configState.value.keepSubjectInSafeZone
-        ).copy(isModifiedManually = false)
+            )
+        } else {
+            keyframeEngine.rebuildSegmentKeyframes(
+                segment = seg.copy(
+                    startMs = seg.autoDefaultStartMs,
+                    endMs = seg.autoDefaultEndMs,
+                    isModifiedManually = false
+                ),
+                newDirection = seg.autoDefaultDirection,
+                newStartZoom = 1.00f,
+                newPeakZoom = seg.autoDefaultZoomPeak,
+                newSubjectX = seg.autoDefaultSubjectX,
+                newSubjectY = seg.autoDefaultSubjectY,
+                keepSubjectInSafeZone = cfg.keepSubjectInSafeZone
+            ).copy(isModifiedManually = false)
+        }
 
         currentList[idx] = restored
         commitUpdatedSegments(currentList)
@@ -1074,7 +1106,16 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
             segments = updatedList,
             keepSubjectInSafeZone = configState.value.keepSubjectInSafeZone
         )
-        _uiState.update { it.copy(segments = syncedList) }
+        val validation = keyframeEngine.validateClipAndKeyframeSettings(
+            segments = syncedList,
+            expectedPresetSequence = configState.value.fixedDirectionPresets
+        )
+        _uiState.update {
+            it.copy(
+                segments = syncedList,
+                exactSettingsValidation = validation
+            )
+        }
         persistCurrentSegmentsAsync(syncedList)
     }
 

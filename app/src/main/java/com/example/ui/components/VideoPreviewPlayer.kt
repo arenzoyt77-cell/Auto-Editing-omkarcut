@@ -460,9 +460,9 @@ fun VideoPreviewPlayer(
 
                         // Smart Zoom & Keyframe interpolation pill
                         val kfLabel = when {
-                            liveTransform.segmentProgress < 0.34f -> "ZOOM IN"
-                            liveTransform.segmentProgress < 0.70f -> "ZOOM HOLD"
-                            else -> "ZOOM OUT"
+                            liveTransform.segmentProgress < 0.34f -> "KF1→KF2"
+                            liveTransform.segmentProgress < 0.70f -> "KF2"
+                            else -> "KF2→KF3"
                         }
                         Box(
                             modifier = Modifier
@@ -474,7 +474,14 @@ fun VideoPreviewPlayer(
                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                         ) {
                             Text(
-                                text = String.format(Locale.US, "%s • %.2fx", kfLabel, activeZoom),
+                                text = String.format(
+                                    Locale.US,
+                                    "%s • X %s Y %s • %s",
+                                    kfLabel,
+                                    liveTransform.formattedX,
+                                    liveTransform.formattedY,
+                                    liveTransform.formattedZoomPercent
+                                ),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = KeyframeAmber,
                                 fontWeight = FontWeight.Bold

@@ -627,20 +627,24 @@ private fun TimelineSegmentBlock(
             overflow = TextOverflow.Ellipsis
         )
 
-        // Keyframe A -> Keyframe B + Smart Zoom Indicator
+        // Keyframe Sequence + Smart Zoom Indicator
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "◆A → ◆B",
+                text = if (segment.hasExactKeyframes) "◆KF1 → ◆KF2 → ◆KF3" else "◆A → ◆B",
                 style = MaterialTheme.typography.labelSmall,
                 fontSize = 9.sp,
                 color = KeyframeAmber
             )
             Text(
-                text = "Zoom ${String.format(Locale.US, "%.2fx", segment.smartZoomPeak)}",
+                text = if (segment.hasExactKeyframes) {
+                    "${segment.keyframeA.formattedZoomPercent}→${segment.keyframeB.formattedZoomPercent}→${segment.endKeyframe.formattedZoomPercent}"
+                } else {
+                    "Zoom ${String.format(Locale.US, "%.2fx", segment.smartZoomPeak)}"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 fontSize = 9.sp,
                 color = NeonEmerald
@@ -814,7 +818,7 @@ private fun SegmentEditControlsPanel(
             }
         }
 
-        // Control 3: Adjust Keyframe B Smart Zoom (1.00x -> 1.08x-1.25x)
+        // Control 3: Adjust Keyframe B Smart Zoom
         Column {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -830,7 +834,7 @@ private fun SegmentEditControlsPanel(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "3. SMART ZOOM (KEYFRAME A → KEYFRAME B)",
+                        text = "3. SMART ZOOM & EXACT KEYFRAME SEQUENCE",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted
                     )
@@ -838,20 +842,21 @@ private fun SegmentEditControlsPanel(
                 Text(
                     text = String.format(
                         Locale.US,
-                        "%.2fx → %.2fx",
+                        "%.2fx → %.2fx → %.2fx",
                         segment.keyframeA.zoom,
-                        segment.smartZoomPeak
+                        segment.smartZoomPeak,
+                        segment.endKeyframe.zoom
                     ),
                     style = MaterialTheme.typography.labelMedium,
                     color = KeyframeAmber
                 )
             }
             Slider(
-                value = segment.smartZoomPeak,
+                value = segment.smartZoomPeak.coerceIn(1.00f, 1.50f),
                 onValueChange = { newPeak ->
                     onZoomChanged(segment.keyframeA.zoom, newPeak)
                 },
-                valueRange = 1.00f..1.25f,
+                valueRange = 1.00f..1.50f,
                 colors = SliderDefaults.colors(
                     thumbColor = KeyframeAmber,
                     activeTrackColor = KeyframeAmber,
@@ -859,6 +864,55 @@ private fun SegmentEditControlsPanel(
                 ),
                 modifier = Modifier.testTag("smart_zoom_slider")
             )
+
+            // Preserved Exact Keyframe Sequence Card (KF1 -> KF2 -> KF3)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(ElevatedCardBg)
+                    .border(1.dp, GlassBorder, RoundedCornerShape(10.dp))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "PRESERVED KEYFRAME SEQUENCE (IN ORDER)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = ElectricCyan,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "CLIP #$displayIndex • ${segment.cameraDirection.name}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = NeonEmerald,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                segment.keyframes.forEachIndexed { kfIdx, kf ->
+                    Text(
+                        text = "Keyframe ${kfIdx + 1}: ${kf.formattedSummary}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontSize = 11.sp,
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                if (!segment.hasExplicitKeyframeTiming) {
+                    Text(
+                        text = "Timing Limitation: Reference keyframe timestamps are not established in project data (no timestamps invented). Provide reference timing for Keyframes 1–3 to lock exact timestamps.",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        color = KeyframeAmber
+                    )
+                }
+            }
         }
 
         // Control 4: Adjust Subject Tracking Position (Horizontal X & Vertical Y)
