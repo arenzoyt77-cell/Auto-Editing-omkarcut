@@ -250,7 +250,9 @@ data class VideoSegment(
     val autoDefaultSubjectX: Float = subjectRegion.startCenterX,
     val autoDefaultSubjectY: Float = subjectRegion.startCenterY,
     val autoDefaultStartMs: Long = startMs,
-    val autoDefaultEndMs: Long = endMs
+    val autoDefaultEndMs: Long = endMs,
+    val alignmentStatus: String = if (speechConfidence >= 0.75f) "AUDIO_ALIGNED" else "LOW_CONFIDENCE_FLAGGED",
+    val needsTimingCorrection: Boolean = speechConfidence < 0.75f
 ) {
     val keyframes: List<CameraKeyframe>
         get() = listOf(keyframeA, keyframeB, endKeyframe)
@@ -262,13 +264,16 @@ data class VideoSegment(
         get() = keyframeA.hasExplicitTimestamp && keyframeB.hasExplicitTimestamp && endKeyframe.hasExplicitTimestamp
 
     val durationMs: Long
-        get() = (endMs - startMs).coerceAtLeast(100L)
+        get() = (endMs - startMs).coerceAtLeast(80L)
 
     val formattedRange: String
         get() = "${formatTimestampPrecise(startMs)} – ${formatTimestampPrecise(endMs)}"
 
     val formattedDurationSec: String
         get() = String.format(Locale.US, "%.2fs", durationMs / 1000f)
+
+    val formattedAlignmentConfidence: String
+        get() = "${(speechConfidence * 100f).roundToInt()}% • $alignmentStatus"
 
     val formattedZoomRange: String
         get() = if (hasExactKeyframes) {
@@ -297,6 +302,34 @@ data class AutoCutConfig(
 ) {
     companion object {
         const val DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT =
+            "अरे रुको (split)\n\n" +
+                "क्यों? क्या हुई? (split)\n\n" +
+                "अरे मेरे को हेडशॉट मत मारना। (split)\n\n" +
+                "हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं। (split)\n\n" +
+                "मेरे को मत मारना। (split)\n\n" +
+                "मैं तो मारूंगा। (split)\n\n" +
+                "जग्गू दादा बोलेंगे साला एक लड़की के हाथों से पिट गया। (split)\n\n" +
+                "अरे मेरी माइनस लग जाएगी। (split)\n\n" +
+                "तो ट्रेनिंग खेलना सरकारी सुविधा है। (split)\n\n" +
+                "ट्रेनिंग पसंद नहीं है। (split)\n\n" +
+                "पसंद नहीं है। पसंद मुझे लूडो भी नहीं है। लेकिन खेलता हूं ना। (split)\n\n" +
+                "लूडो तो जानते हो? (split)\n\n" +
+                "अरे जानती हूं। (split)\n\n" +
+                "आज के बाद तुम वही खेलना। ठीक है। चलो थैंक यू बोलो। (split)\n\n" +
+                "थैंक यू। (split)\n\n" +
+                "बड़े समझदारी है। तुरंत बोल दिया। अब आई लव यू बोलो। (split)\n\n" +
+                "नहीं। (split)\n\n" +
+                "तुम जानते हो मैं एक यूटबर हूं। (split)\n\n" +
+                "अरे जानती हूं। (split)\n\n" +
+                "कितने सब्सक्राइबर हैं? (split)\n\n" +
+                "वन के्राइबर। (split)\n\n" +
+                "अब ये वन के वाला कौन है? हमसे ज्यादा्राइबर कर लिए। अरे सुनो। (split)\n\n" +
+                "हां बोलो। (split)\n\n" +
+                "मेरे 11्राइबर हैं। आप सब्सक्राइब कर देना तो 12 हो जाएंगे। सहेली से बोल देना 13 हो जाएंगे। (split)\n\n" +
+                "मैच खत्म होने के बाद जा रहे हैं सब्सक्राइब करने। (split)\n\n" +
+                "आई लव यू बोल देना तो 2 मिलियन हो जाएंगे। (split)"
+
+        const val LEGACY_5_CLIP_SPLIT_TRANSCRIPT =
             "हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं। (split) " +
                 "अरे रुको भाई, सामने पूरी स्क्वाड खड़ी है! (split) " +
                 "चलो जल्दी कवर लो, मैं नेड फेंक रहा हूँ। (split) " +
@@ -405,6 +438,8 @@ object SegmentJsonSerializer {
             obj.put("zoomHoldEndTimeMs", seg.zoomHoldEndTimeMs)
             obj.put("zoomEndTimeMs", seg.zoomEndTimeMs)
             obj.put("isModifiedManually", seg.isModifiedManually)
+            obj.put("alignmentStatus", seg.alignmentStatus)
+            obj.put("needsTimingCorrection", seg.needsTimingCorrection)
 
             // SubjectRegion
             val subj = JSONObject()
@@ -592,7 +627,15 @@ object SegmentJsonSerializer {
                         autoDefaultSubjectX = subject.startCenterX,
                         autoDefaultSubjectY = subject.startCenterY,
                         autoDefaultStartMs = startMs,
-                        autoDefaultEndMs = endMs
+                        autoDefaultEndMs = endMs,
+                        alignmentStatus = obj.optString(
+                            "alignmentStatus",
+                            if (obj.getDouble("speechConfidence").toFloat() >= 0.75f) "AUDIO_ALIGNED" else "LOW_CONFIDENCE_FLAGGED"
+                        ),
+                        needsTimingCorrection = obj.optBoolean(
+                            "needsTimingCorrection",
+                            obj.getDouble("speechConfidence").toFloat() < 0.75f
+                        )
                     )
                 )
             }

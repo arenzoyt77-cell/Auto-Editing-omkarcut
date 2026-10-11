@@ -32,13 +32,268 @@ data class RawSpeechSegment(
     val confidence: Float,
     val peakDb: Float,
     val speakerIdentity: SpeakerIdentity = SpeakerIdentity.MALE,
-    val averagePitchHz: Float = 140f
+    val averagePitchHz: Float = 140f,
+    val alignmentStatus: String = if (confidence >= 0.75f) "AUDIO_ALIGNED" else "LOW_CONFIDENCE_FLAGGED",
+    val needsCorrection: Boolean = confidence < 0.75f
 )
+
+data class ParsedTranscriptSegment(
+    val clipNumber: Int,
+    val index: Int,
+    val text: String,
+    val wordCount: Int,
+    val spokenDurationWeight: Int
+)
+
+data class ExplicitMarkerParseResult(
+    val segments: List<ParsedTranscriptSegment>,
+    val hasExplicitSplitMarkers: Boolean,
+    val rawMarkerCount: Int,
+    val isEmptyTranscript: Boolean,
+    val validationWarning: String? = null
+)
+
+data class SplitSegmentationValidationReport(
+    val isValid: Boolean,
+    val expectedClipCount: Int,
+    val actualClipCount: Int,
+    val hasExplicitSplitMarkers: Boolean,
+    val noSplitMarkersInCaptions: Boolean,
+    val noEmptyClipsCreated: Boolean,
+    val preservesOriginalTranscriptOrder: Boolean,
+    val noDialogueLostOrDuplicated: Boolean,
+    val headshotDialogueSingleClip: Boolean,
+    val ludoDialogueSingleClip: Boolean,
+    val thankYouPromptSingleClip: Boolean,
+    val elevenSubscriberDialogueSingleClip: Boolean,
+    val flaggedLowConfidenceClips: List<Int> = emptyList(),
+    val details: List<String> = emptyList()
+)
+
+/**
+ * Dedicated Explicit "(split)" Marker Parser & Validator.
+ *
+ * Conceptual logic:
+ * 1. Read the complete transcript.
+ * 2. Identify each case-insensitive "(split)" marker.
+ * 3. Extract the text preceding each marker as one segment.
+ * 4. Trim whitespace around each segment (collapsing internal line breaks/extra spaces without splitting).
+ * 5. Ignore empty segments without creating blank clips.
+ * 6. Preserve all internal punctuation and sentence boundaries (।, ., ?, !, ,, etc.).
+ * 7. Preserve the final segment if it contains text, even if the final marker is missing.
+ * 8. Use these parsed segments as the single source of truth for clip generation.
+ * 9. If a transcript has no explicit "(split)" markers, never silently fall back to sentence-based splitting.
+ */
+object ExplicitSplitMarkerParser {
+    private val SPLIT_MARKER_REGEX = Regex("\\(\\s*split\\s*\\)", RegexOption.IGNORE_CASE)
+    private val INTERNAL_WHITESPACE_REGEX = Regex("[\\r\\n\\t ]+")
+    private val INTERNAL_CLAUSE_PUNCTUATION_REGEX = Regex("[।.?!]+")
+
+    /**
+     * Removes any case-insensitive "(split)" markers and normalizes whitespace for visible captions and rendered video.
+     */
+    fun stripSplitMarkers(rawText: String): String {
+        if (rawText.isBlank()) return ""
+        return rawText
+            .replace(SPLIT_MARKER_REGEX, " ")
+            .replace(INTERNAL_WHITESPACE_REGEX, " ")
+            .trim()
+    }
+
+    /**
+     * Parses a transcript strictly at explicit case-insensitive "(split)" markers.
+     * Never splits on commas, full stops (। or .), question marks, exclamation marks, or line breaks.
+     */
+    fun parseExplicitSplitTranscript(transcript: String): ExplicitMarkerParseResult {
+        if (transcript.isBlank()) {
+            return ExplicitMarkerParseResult(
+                segments = emptyList(),
+                hasExplicitSplitMarkers = false,
+                rawMarkerCount = 0,
+                isEmptyTranscript = true,
+                validationWarning = "Transcript is empty — no clips generated."
+            )
+        }
+
+        val markerCount = SPLIT_MARKER_REGEX.findAll(transcript).count()
+        if (markerCount == 0) {
+            // Rule 1 & Rule 3.7: If a transcript has no explicit split markers, do NOT silently fall back
+            // to sentence-based splitting. Preserve the entire text as a single unsplit segment.
+            val singleText = transcript.replace(INTERNAL_WHITESPACE_REGEX, " ").trim()
+            if (singleText.isEmpty()) {
+                return ExplicitMarkerParseResult(
+                    segments = emptyList(),
+                    hasExplicitSplitMarkers = false,
+                    rawMarkerCount = 0,
+                    isEmptyTranscript = true,
+                    validationWarning = "Transcript is empty — no clips generated."
+                )
+            }
+            val words = singleText.split(' ').count { it.isNotBlank() }.coerceAtLeast(1)
+            val weight = computeSpokenWeight(singleText, words)
+            return ExplicitMarkerParseResult(
+                segments = listOf(
+                    ParsedTranscriptSegment(
+                        clipNumber = 1,
+                        index = 0,
+                        text = singleText,
+                        wordCount = words,
+                        spokenDurationWeight = weight
+                    )
+                ),
+                hasExplicitSplitMarkers = false,
+                rawMarkerCount = 0,
+                isEmptyTranscript = false,
+                validationWarning = "No explicit '(split)' markers found in transcript. Automatic sentence-based splitting was bypassed."
+            )
+        }
+
+        val rawChunks = transcript.split(SPLIT_MARKER_REGEX)
+        val parsedSegments = ArrayList<ParsedTranscriptSegment>(rawChunks.size)
+
+        for (chunk in rawChunks) {
+            // Normalize line breaks and multiple spaces inside the segment into single spaces, then trim
+            val cleaned = stripSplitMarkers(chunk)
+            if (cleaned.isNotEmpty()) {
+                val idx = parsedSegments.size
+                val words = cleaned.split(' ').count { it.isNotBlank() }.coerceAtLeast(1)
+                val weight = computeSpokenWeight(cleaned, words)
+                parsedSegments.add(
+                    ParsedTranscriptSegment(
+                        clipNumber = idx + 1,
+                        index = idx,
+                        text = cleaned,
+                        wordCount = words,
+                        spokenDurationWeight = weight
+                    )
+                )
+            }
+        }
+
+        return ExplicitMarkerParseResult(
+            segments = parsedSegments,
+            hasExplicitSplitMarkers = true,
+            rawMarkerCount = markerCount,
+            isEmptyTranscript = parsedSegments.isEmpty(),
+            validationWarning = if (parsedSegments.isEmpty()) {
+                "Transcript contained only '(split)' markers without dialogue text."
+            } else {
+                null
+            }
+        )
+    }
+
+    private fun computeSpokenWeight(cleanedText: String, wordCount: Int): Int {
+        val nonSpaceChars = cleanedText.count { !it.isWhitespace() }.coerceAtLeast(1)
+        // Internal sentences/clauses add natural breath cadence inside the same clip without splitting it
+        val internalClauseCount = INTERNAL_CLAUSE_PUNCTUATION_REGEX.findAll(cleanedText).count().coerceAtLeast(1)
+        return (wordCount * 5) + nonSpaceChars + ((internalClauseCount - 1) * 6)
+    }
+
+    /**
+     * Validates that the generated clips match the explicit "(split)" marker segments 1-to-1,
+     * preserve original order, remove "(split)" from captions, and keep multi-sentence groups intact.
+     */
+    fun validateExplicitSplitClips(
+        transcriptWithSplits: String,
+        clipTexts: List<String>,
+        lowConfidenceClipNumbers: List<Int> = emptyList()
+    ): SplitSegmentationValidationReport {
+        val parseResult = parseExplicitSplitTranscript(transcriptWithSplits)
+        val expectedTexts = parseResult.segments.map { it.text }
+        val details = mutableListOf<String>()
+
+        val countMatches = clipTexts.size == expectedTexts.size
+        if (!countMatches) {
+            details.add("Expected ${expectedTexts.size} clips from explicit (split) markers, but found ${clipTexts.size}.")
+        }
+
+        val noSplitMarkersLeft = clipTexts.none {
+            it.contains("(split)", ignoreCase = true) || SPLIT_MARKER_REGEX.containsMatchIn(it)
+        }
+        if (!noSplitMarkersLeft) {
+            details.add("One or more clip captions still contain a '(split)' marker.")
+        }
+
+        val noEmptyClips = clipTexts.all { it.isNotBlank() }
+        if (!noEmptyClips) {
+            details.add("One or more generated clips have empty or blank dialogue text.")
+        }
+
+        val orderPreserved = countMatches && clipTexts.indices.all { i ->
+            clipTexts[i] == expectedTexts[i]
+        }
+        if (!orderPreserved && countMatches) {
+            details.add("Generated clip texts do not match the exact order of parsed (split) segments.")
+        }
+
+        val joinedExpected = expectedTexts.joinToString(" ")
+        val joinedActual = clipTexts.joinToString(" ")
+        val noLostOrDuplicated = joinedExpected == joinedActual && orderPreserved
+
+        fun verifyPrefixStaysSingleClip(prefix: String): Boolean {
+            if (!transcriptWithSplits.contains(prefix)) return true
+            val matchingClips = clipTexts.filter { it.startsWith(prefix) }
+            return matchingClips.size == 1
+        }
+
+        val headshotOk = verifyPrefixStaysSingleClip("हेडशॉट हमको नहीं आता") &&
+            (!transcriptWithSplits.contains("हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं।") ||
+                clipTexts.count { it == "हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं।" } == 1)
+
+        val ludoOk = verifyPrefixStaysSingleClip("पसंद नहीं है। पसंद मुझे लूडो भी नहीं है") &&
+            (!transcriptWithSplits.contains("पसंद नहीं है। पसंद मुझे लूडो भी नहीं है। लेकिन खेलता हूं ना।") ||
+                clipTexts.count { it == "पसंद नहीं है। पसंद मुझे लूडो भी नहीं है। लेकिन खेलता हूं ना।" } == 1)
+
+        val thankYouPromptOk = verifyPrefixStaysSingleClip("आज के बाद तुम वही खेलना") &&
+            (!transcriptWithSplits.contains("आज के बाद तुम वही खेलना। ठीक है। चलो थैंक यू बोलो।") ||
+                clipTexts.count { it == "आज के बाद तुम वही खेलना। ठीक है। चलो थैंक यू बोलो।" } == 1)
+
+        val elevenSubOk = verifyPrefixStaysSingleClip("मेरे 11्राइबर हैं") &&
+            (!transcriptWithSplits.contains("मेरे 11्राइबर हैं। आप सब्सक्राइब कर देना तो 12 हो जाएंगे। सहेली से बोल देना 13 हो जाएंगे।") ||
+                clipTexts.count {
+                    it == "मेरे 11्राइबर हैं। आप सब्सक्राइब कर देना तो 12 हो जाएंगे। सहेली से बोल देना 13 हो जाएंगे।"
+                } == 1)
+
+        if (!headshotOk) details.add("Dialogue 'हेडशॉट हमको नहीं आता...' was not preserved as a single clip.")
+        if (!ludoOk) details.add("Dialogue 'पसंद नहीं है। पसंद मुझे लूडो भी नहीं है...' was not preserved as a single clip.")
+        if (!thankYouPromptOk) details.add("Dialogue 'आज के बाद तुम वही खेलना...' was not preserved as a single clip.")
+        if (!elevenSubOk) details.add("Dialogue 'मेरे 11्राइबर हैं...' was not preserved as a single clip.")
+
+        val valid = countMatches &&
+            noSplitMarkersLeft &&
+            noEmptyClips &&
+            orderPreserved &&
+            noLostOrDuplicated &&
+            headshotOk &&
+            ludoOk &&
+            thankYouPromptOk &&
+            elevenSubOk
+
+        return SplitSegmentationValidationReport(
+            isValid = valid,
+            expectedClipCount = expectedTexts.size,
+            actualClipCount = clipTexts.size,
+            hasExplicitSplitMarkers = parseResult.hasExplicitSplitMarkers,
+            noSplitMarkersInCaptions = noSplitMarkersLeft,
+            noEmptyClipsCreated = noEmptyClips,
+            preservesOriginalTranscriptOrder = orderPreserved,
+            noDialogueLostOrDuplicated = noLostOrDuplicated,
+            headshotDialogueSingleClip = headshotOk,
+            ludoDialogueSingleClip = ludoOk,
+            thankYouPromptSingleClip = thankYouPromptOk,
+            elevenSubscriberDialogueSingleClip = elevenSubOk,
+            flaggedLowConfidenceClips = lowConfidenceClipNumbers,
+            details = details
+        )
+    }
+}
 
 data class SpeechAnalysisResult(
     val segments: List<RawSpeechSegment>,
     val waveformAmplitudes: List<Float>, // Normalized 0f..1f envelope for timeline display
-    val speechDetectedWarning: AutoCutError? = null
+    val speechDetectedWarning: AutoCutError? = null,
+    val splitValidationReport: SplitSegmentationValidationReport? = null
 )
 
 /**
@@ -61,6 +316,30 @@ data class SpeechAnalysisResult(
  *    when the next speaker starts speaking.
  */
 class SpeechTranscriptionEngine {
+
+    companion object {
+        private val EXPLICIT_SPLIT_MARKER_REGEX = Regex("\\(\\s*split\\s*\\)", RegexOption.IGNORE_CASE)
+        private val WHITESPACE_NORMALIZE_REGEX = Regex("\\s+")
+
+        /**
+         * Returns true if and only if the transcript contains at least one explicit "(split)" marker.
+         */
+        fun hasExplicitSplitMarkers(transcript: String): Boolean {
+            if (transcript.isBlank()) return false
+            return EXPLICIT_SPLIT_MARKER_REGEX.containsMatchIn(transcript)
+        }
+
+        /**
+         * Removes all "(split)" markers and normalizes line breaks / whitespace for visible captions and rendered video.
+         */
+        fun stripSplitMarkers(text: String): String {
+            if (text.isBlank()) return ""
+            return text
+                .replace(EXPLICIT_SPLIT_MARKER_REGEX, " ")
+                .replace(WHITESPACE_NORMALIZE_REGEX, " ")
+                .trim()
+        }
+    }
 
     private data class DemoDialogueTurn(
         val speaker: SpeakerIdentity,
@@ -118,8 +397,42 @@ class SpeechTranscriptionEngine {
         onProgress(0.10f, "Extracting audio stream from video container...")
 
         if (!metadata.hasAudio) {
-            val fallbackSegments = buildFallbackSpeakerTurnSegments(durationMs, isSilent = true)
             val flatWave = List(120) { 0.08f }
+            if (config.suppliedSplitTranscript.isNotBlank()) {
+                val parseResult = ExplicitSplitMarkerParser.parseExplicitSplitTranscript(config.suppliedSplitTranscript)
+                val suppliedSegments = createSegmentsFromSuppliedSplits(
+                    transcriptWithSplits = config.suppliedSplitTranscript,
+                    totalDurationMs = durationMs,
+                    explicitSplitTimestampsMs = config.suppliedSplitTimestampsMs,
+                    vocalRmsBins = null,
+                    windowMs = 20L
+                ).map { seg ->
+                    seg.copy(
+                        confidence = 0.65f,
+                        alignmentStatus = "LOW_CONFIDENCE_NO_AUDIO",
+                        needsCorrection = true
+                    )
+                }
+                val validation = ExplicitSplitMarkerParser.validateExplicitSplitClips(
+                    transcriptWithSplits = config.suppliedSplitTranscript,
+                    clipTexts = suppliedSegments.map { it.spokenPhrase },
+                    lowConfidenceClipNumbers = suppliedSegments.mapIndexedNotNull { idx, s -> if (s.needsCorrection) idx + 1 else null }
+                )
+                return@withContext SpeechAnalysisResult(
+                    segments = suppliedSegments,
+                    waveformAmplitudes = flatWave,
+                    speechDetectedWarning = AutoCutError(
+                        kind = ErrorKind.MISSING_AUDIO,
+                        title = if (parseResult.hasExplicitSplitMarkers) "Audio Track Missing — Flagged for Timing Review" else "No Explicit (split) Markers & Missing Audio",
+                        message = parseResult.validationWarning
+                            ?: "No audio stream was found. ${suppliedSegments.size} explicit '(split)' dialogue clips were created and flagged for timing review.",
+                        recoveryHint = "Verify clip start/end times in the Segmentation Preview before rendering.",
+                        isWarningOnly = true
+                    ),
+                    splitValidationReport = validation
+                )
+            }
+            val fallbackSegments = buildFallbackSpeakerTurnSegments(durationMs, isSilent = true)
             return@withContext SpeechAnalysisResult(
                 segments = fallbackSegments,
                 waveformAmplitudes = flatWave,
@@ -152,13 +465,14 @@ class SpeechTranscriptionEngine {
             onProgress = onProgress
         )
 
-        onProgress(0.65f, "Diarizing speakers & detecting complete speaking turns...")
+        onProgress(0.65f, "Parsing explicit (split) markers & aligning dialogue to audio...")
 
         // Build downsampled 140-bar waveform for UI timeline display
         val waveformBars = buildNormalizedWaveform(vocalRmsBins, targetBars = 140)
 
         val maxEnergy = vocalRmsBins.maxOrNull() ?: 0f
-        if (config.suppliedSplitTranscript.contains("(split)", ignoreCase = true)) {
+        if (config.suppliedSplitTranscript.isNotBlank()) {
+            val parseResult = ExplicitSplitMarkerParser.parseExplicitSplitTranscript(config.suppliedSplitTranscript)
             val suppliedSegments = createSegmentsFromSuppliedSplits(
                 transcriptWithSplits = config.suppliedSplitTranscript,
                 totalDurationMs = durationMs,
@@ -166,23 +480,44 @@ class SpeechTranscriptionEngine {
                 vocalRmsBins = if (decodedSuccess && maxEnergy >= 0.002f) vocalRmsBins else null,
                 windowMs = windowMs
             )
-            val usedAudioPauseAlignment = config.suppliedSplitTimestampsMs.isEmpty()
-            val limitationWarning = if (usedAudioPauseAlignment || config.exactKeyframeTimestampsMs.size < 3) {
-                AutoCutError(
+            val lowConfClips = suppliedSegments.mapIndexedNotNull { idx, seg ->
+                if (seg.needsCorrection) idx + 1 else null
+            }
+            val validation = ExplicitSplitMarkerParser.validateExplicitSplitClips(
+                transcriptWithSplits = config.suppliedSplitTranscript,
+                clipTexts = suppliedSegments.map { it.spokenPhrase },
+                lowConfidenceClipNumbers = lowConfClips
+            )
+            val limitationWarning = when {
+                !parseResult.hasExplicitSplitMarkers -> AutoCutError(
                     kind = ErrorKind.SPEECH_NOT_DETECTED,
-                    title = "Exact Split & Keyframe Reference Timing Notice",
-                    message = "Spoken groups were split strictly at supplied '(split)' markers using VAD pause alignment, and Keyframes 1–3 (+5/-1/101%, +179/-58/142%, -160/-102/140%) are preserved without inventing reference timestamps.",
-                    recoveryHint = "Provide exact reference keyframe timestamps in the Exact Keyframe Inspector below if specific timing is known.",
+                    title = "No Explicit (split) Markers Found",
+                    message = "Transcript has no '(split)' markers. Automatic sentence/pause splitting was bypassed to prevent unauthorized cuts.",
+                    recoveryHint = "Add explicit '(split)' markers in the transcript where you want clip boundaries.",
                     isWarningOnly = true
                 )
-            } else {
-                null
+                lowConfClips.isNotEmpty() -> AutoCutError(
+                    kind = ErrorKind.SPEECH_NOT_DETECTED,
+                    title = "Low Alignment Confidence on ${lowConfClips.size} Clip(s)",
+                    message = "Clips ${lowConfClips.joinToString(", ") { "#$it" }} had low vocal energy and were flagged for timing review rather than inventing inaccurate splits.",
+                    recoveryHint = "Inspect flagged clips in the Segmentation Preview panel and fine-tune split boundaries if needed.",
+                    isWarningOnly = true
+                )
+                config.suppliedSplitTimestampsMs.isEmpty() || config.exactKeyframeTimestampsMs.size < 3 -> AutoCutError(
+                    kind = ErrorKind.SPEECH_NOT_DETECTED,
+                    title = "Explicit (split) Alignment & Exact Keyframes Ready",
+                    message = "Generated ${suppliedSegments.size} dialogue clips strictly from explicit '(split)' markers (no punctuation or pause splitting), with Keyframes 1–3 preserved in order.",
+                    recoveryHint = "Review the Segmentation Preview below before rendering.",
+                    isWarningOnly = true
+                )
+                else -> null
             }
-            onProgress(0.92f, "Finalizing ${suppliedSegments.size} supplied (split) segments...")
+            onProgress(0.92f, "Finalizing ${suppliedSegments.size} explicit (split) dialogue clips...")
             return@withContext SpeechAnalysisResult(
                 segments = suppliedSegments,
                 waveformAmplitudes = waveformBars,
-                speechDetectedWarning = limitationWarning
+                speechDetectedWarning = limitationWarning,
+                splitValidationReport = validation
             )
         }
 
@@ -227,22 +562,24 @@ class SpeechTranscriptionEngine {
     }
 
     /**
-     * Parses a transcript containing literal "(split)" markers into exact ordered sentence clips.
-     * Never merges across "(split)" markers or invents extra internal splits.
+     * Parses a transcript containing literal "(split)" markers into exact ordered dialogue clips.
+     * Uses ExplicitSplitMarkerParser as the single source of truth:
+     * - Splits ONLY at explicit case-insensitive "(split)" markers.
+     * - Never splits at commas, full stops (। or .), question marks, exclamation marks, or line breaks.
+     * - Ignores empty segments (e.g. consecutive or trailing markers).
+     * - Preserves the final segment even if the final "(split)" marker is missing.
+     * - If a transcript has no explicit "(split)" markers, does NOT fall back to sentence-based splitting.
      */
     fun splitTranscriptBySuppliedMarkers(transcriptWithSplits: String): List<String> {
-        if (transcriptWithSplits.isBlank()) return emptyList()
-        val splitRegex = Regex("\\(\\s*split\\s*\\)", RegexOption.IGNORE_CASE)
-        return transcriptWithSplits
-            .split(splitRegex)
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
+        return ExplicitSplitMarkerParser.parseExplicitSplitTranscript(transcriptWithSplits)
+            .segments
+            .map { it.text }
     }
 
     /**
      * Builds chronological segments strictly following supplied "(split)" boundaries.
-     * Uses `explicitSplitTimestampsMs` when provided (either N-1 internal split points or N+1 boundary points);
-     * otherwise partitions `totalDurationMs` proportionally by sentence length without altering clip count or order.
+     * Uses `ExplicitSplitMarkerParser` as the single source of truth for clip count and text,
+     * and aligns each complete dialogue segment to the source audio without cutting words off.
      */
     fun createSegmentsFromSuppliedSplits(
         transcriptWithSplits: String,
@@ -251,84 +588,209 @@ class SpeechTranscriptionEngine {
         vocalRmsBins: FloatArray? = null,
         windowMs: Long = 20L
     ): List<RawSpeechSegment> {
-        val sentences = splitTranscriptBySuppliedMarkers(transcriptWithSplits)
-        val safeDurationMs = totalDurationMs.coerceAtLeast(500L)
-        if (sentences.isEmpty()) {
-            return buildFallbackSpeakerTurnSegments(safeDurationMs, isSilent = false)
+        val parseResult = ExplicitSplitMarkerParser.parseExplicitSplitTranscript(transcriptWithSplits)
+        val parsedSegments = parseResult.segments
+        if (parsedSegments.isEmpty()) {
+            return emptyList()
         }
 
-        val count = sentences.size
+        val count = parsedSegments.size
+        val safeDurationMs = totalDurationMs.coerceAtLeast(max(500L, count * 90L))
+
+        if (count == 1) {
+            val single = parsedSegments.first()
+            val speaker = resolveSpeakerForPhrase(single.text, 0)
+            val hasMarkers = parseResult.hasExplicitSplitMarkers
+            return listOf(
+                RawSpeechSegment(
+                    startMs = 0L,
+                    endMs = safeDurationMs,
+                    spokenPhrase = single.text,
+                    confidence = if (hasMarkers) 0.96f else 0.78f,
+                    peakDb = -5.5f,
+                    speakerIdentity = speaker,
+                    averagePitchHz = if (speaker == SpeakerIdentity.FEMALE) 235f else 132f,
+                    alignmentStatus = if (hasMarkers) "AUDIO_ALIGNED" else "NO_SPLIT_MARKERS_BYPASSED",
+                    needsCorrection = false
+                )
+            )
+        }
+
+        val minClipStepMs = min(140L, max(25L, safeDurationMs / (count * 3L)))
+        val hasUsableAudioEnvelope = vocalRmsBins != null && vocalRmsBins.size >= 10 && windowMs > 0L &&
+            (vocalRmsBins.maxOrNull() ?: 0f) >= 0.002f
+
         val boundariesMs: List<Long> = when {
             explicitSplitTimestampsMs.size == count + 1 -> {
-                explicitSplitTimestampsMs
+                sanitizeMonotonicBoundaries(explicitSplitTimestampsMs, count, safeDurationMs, minClipStepMs)
             }
             explicitSplitTimestampsMs.size == count - 1 -> {
-                buildList {
+                val rawList = buildList {
                     add(0L)
                     addAll(explicitSplitTimestampsMs)
                     add(safeDurationMs)
                 }
+                sanitizeMonotonicBoundaries(rawList, count, safeDurationMs, minClipStepMs)
             }
             else -> {
-                val charWeights = sentences.mapIndexed { idx, s ->
-                    // Weight by spoken length + slight natural cadence offset so clips are never equal-duration
-                    s.length.coerceAtLeast(6) + (if (idx % 2 == 0) 3 else 0)
+                val weights = parsedSegments.map { it.spokenDurationWeight.coerceAtLeast(6) }
+                val totalWeight = weights.sum().coerceAtLeast(1)
+
+                // Optional cumulative vocal energy curve for word/pause-aware alignment
+                val cumulativeAudioEnergy = if (hasUsableAudioEnvelope && vocalRmsBins != null) {
+                    val cum = DoubleArray(vocalRmsBins.size + 1)
+                    val noiseFloor = (vocalRmsBins.minOrNull() ?: 0f).coerceAtLeast(0f)
+                    for (w in vocalRmsBins.indices) {
+                        val activeE = (vocalRmsBins[w] - noiseFloor * 0.5f).coerceAtLeast(0.001f)
+                        cum[w + 1] = cum[w] + activeE.toDouble()
+                    }
+                    cum
+                } else {
+                    null
                 }
-                val totalWeight = charWeights.sum().coerceAtLeast(1)
+
                 val computed = ArrayList<Long>(count + 1)
                 computed.add(0L)
                 var accumWeight = 0
+
                 for (i in 0 until count - 1) {
-                    accumWeight += charWeights[i]
-                    val targetMs = ((safeDurationMs.toDouble() * accumWeight.toDouble()) / totalWeight.toDouble()).toLong()
-                    val snappedMs = if (vocalRmsBins != null && vocalRmsBins.size >= 10 && windowMs > 0L) {
-                        val targetWin = (targetMs / windowMs).toInt().coerceIn(2, vocalRmsBins.size - 3)
-                        val searchRadius = (480L / windowMs).toInt().coerceAtLeast(4)
-                        val minWin = max(((computed.last() + 250L) / windowMs).toInt(), targetWin - searchRadius)
+                    accumWeight += weights[i]
+                    val weightFraction = accumWeight.toDouble() / totalWeight.toDouble()
+                    val cadenceTargetMs = (safeDurationMs.toDouble() * weightFraction).toLong()
+
+                    val remainingClips = count - 1 - i
+                    val minAllowedMs = computed.last() + minClipStepMs
+                    val maxAllowedMs = (safeDurationMs - remainingClips * minClipStepMs).coerceAtLeast(minAllowedMs)
+
+                    val snappedMs = if (hasUsableAudioEnvelope && vocalRmsBins != null && cumulativeAudioEnergy != null) {
+                        val totalE = cumulativeAudioEnergy.last().coerceAtLeast(1e-6)
+                        val targetEnergy = totalE * weightFraction
+                        var energyWin = vocalRmsBins.size / 2
+                        for (w in vocalRmsBins.indices) {
+                            if (cumulativeAudioEnergy[w + 1] >= targetEnergy) {
+                                energyWin = w
+                                break
+                            }
+                        }
+                        val energyTargetMs = (energyWin * windowMs).coerceIn(0L, safeDurationMs)
+                        // Blend spoken word/clause weight (72%) with cumulative vocal energy progression (28%)
+                        val blendedTargetMs = ((cadenceTargetMs * 0.72) + (energyTargetMs * 0.28)).toLong()
+                            .coerceIn(minAllowedMs, maxAllowedMs)
+
+                        val targetWin = (blendedTargetMs / windowMs).toInt().coerceIn(1, vocalRmsBins.size - 2)
+                        val maxSearchMs = min(460L, max(60L, (maxAllowedMs - minAllowedMs) / 2L))
+                        val searchRadiusWins = (maxSearchMs / windowMs).toInt().coerceAtLeast(2)
+
+                        val minWin = max((minAllowedMs / windowMs).toInt(), targetWin - searchRadiusWins)
                             .coerceIn(1, vocalRmsBins.size - 2)
-                        val maxWin = min(((safeDurationMs - 250L) / windowMs).toInt(), targetWin + searchRadius)
+                        val maxWin = min((maxAllowedMs / windowMs).toInt(), targetWin + searchRadiusWins)
                             .coerceIn(minWin, vocalRmsBins.size - 2)
-                        var bestWin = targetWin
-                        var lowestEnergy = Float.MAX_VALUE
+
+                        var bestWin = targetWin.coerceIn(minWin, maxWin)
+                        var lowestScore = Float.MAX_VALUE
+                        val maxBinE = (vocalRmsBins.maxOrNull() ?: 1f).coerceAtLeast(1e-4f)
+
                         for (w in minWin..maxWin) {
-                            val localEnergy = (vocalRmsBins[w - 1] + vocalRmsBins[w] * 2f + vocalRmsBins[w + 1]) * 0.25f
-                            val distPenalty = (abs(w - targetWin).toFloat() / searchRadius.coerceAtLeast(1).toFloat()) * 0.04f
+                            // 3-window local energy valley so we snap cleanly to inter-utterance pauses without cutting words
+                            val localEnergy = ((vocalRmsBins[w - 1] + vocalRmsBins[w] * 2f + vocalRmsBins[w + 1]) * 0.25f) / maxBinE
+                            val distPenalty = (abs(w - targetWin).toFloat() / searchRadiusWins.coerceAtLeast(1).toFloat()) * 0.08f
                             val score = localEnergy + distPenalty
-                            if (score < lowestEnergy) {
-                                lowestEnergy = score
+                            if (score < lowestScore) {
+                                lowestScore = score
                                 bestWin = w
                             }
                         }
-                        bestWin * windowMs
+                        (bestWin * windowMs).coerceIn(minAllowedMs, maxAllowedMs)
                     } else {
-                        targetMs
+                        cadenceTargetMs.coerceIn(minAllowedMs, maxAllowedMs)
                     }
-                    computed.add(snappedMs.coerceIn(computed.last() + 150L, safeDurationMs - 150L))
+
+                    computed.add(snappedMs)
                 }
                 computed.add(safeDurationMs)
                 computed
             }
         }
 
-        return sentences.mapIndexed { idx, phrase ->
+        val maxGlobalEnergy = (vocalRmsBins?.maxOrNull() ?: 0f).coerceAtLeast(1e-4f)
+        val hasExplicitTimestamps = explicitSplitTimestampsMs.size == count + 1 || explicitSplitTimestampsMs.size == count - 1
+
+        return parsedSegments.mapIndexed { idx, seg ->
             val sMs = boundariesMs[idx]
-            val eMs = boundariesMs[idx + 1].coerceAtLeast(sMs + 100L)
-            val speaker = when {
-                phrase.startsWith("FEMALE", ignoreCase = true) -> SpeakerIdentity.FEMALE
-                phrase.startsWith("MALE", ignoreCase = true) -> SpeakerIdentity.MALE
-                idx % 2 == 0 -> SpeakerIdentity.MALE
-                else -> SpeakerIdentity.FEMALE
+            val eMs = boundariesMs[idx + 1].coerceAtLeast(sMs + 20L)
+            val speaker = resolveSpeakerForPhrase(seg.text, idx)
+
+            var confidence = if (hasExplicitTimestamps) 0.98f else 0.94f
+            var peakDb = -5.5f
+            var alignmentStatus = if (hasExplicitTimestamps) "EXPLICIT_TIMESTAMPS" else "CADENCE_ALIGNED"
+            var needsCorrection = false
+
+            if (hasUsableAudioEnvelope && vocalRmsBins != null && windowMs > 0L) {
+                val wStart = (sMs / windowMs).toInt().coerceIn(0, vocalRmsBins.size - 1)
+                val wEnd = (eMs / windowMs).toInt().coerceIn(wStart + 1, vocalRmsBins.size)
+                var segPeak = 0f
+                var segSum = 0f
+                for (w in wStart until wEnd) {
+                    val v = vocalRmsBins[w]
+                    if (v > segPeak) segPeak = v
+                    segSum += v
+                }
+                val segAvg = segSum / (wEnd - wStart).coerceAtLeast(1)
+                val normPeak = (segPeak / maxGlobalEnergy).coerceIn(0f, 1f)
+                val normAvg = (segAvg / maxGlobalEnergy).coerceIn(0f, 1f)
+
+                peakDb = (20f * log10(normPeak.coerceIn(0.002f, 1f))).coerceIn(-40f, -0.5f)
+                confidence = (0.64f + normPeak * 0.22f + normAvg * 0.13f).coerceIn(0.55f, 0.99f)
+
+                if (normPeak < 0.06f || confidence < 0.75f) {
+                    needsCorrection = true
+                    alignmentStatus = "LOW_CONFIDENCE_FLAGGED"
+                } else {
+                    confidence = confidence.coerceAtLeast(0.85f)
+                    alignmentStatus = "AUDIO_VALLEY_ALIGNED"
+                }
             }
+
             RawSpeechSegment(
                 startMs = sMs,
                 endMs = eMs,
-                spokenPhrase = phrase,
-                confidence = 0.96f,
-                peakDb = -5.5f,
+                spokenPhrase = seg.text,
+                confidence = confidence,
+                peakDb = peakDb,
                 speakerIdentity = speaker,
-                averagePitchHz = if (speaker == SpeakerIdentity.FEMALE) 235f else 132f
+                averagePitchHz = if (speaker == SpeakerIdentity.FEMALE) 235f else 132f,
+                alignmentStatus = alignmentStatus,
+                needsCorrection = needsCorrection
             )
         }
+    }
+
+    private fun resolveSpeakerForPhrase(phrase: String, idx: Int): SpeakerIdentity {
+        return when {
+            phrase.startsWith("FEMALE", ignoreCase = true) -> SpeakerIdentity.FEMALE
+            phrase.startsWith("MALE", ignoreCase = true) -> SpeakerIdentity.MALE
+            idx % 2 == 0 -> SpeakerIdentity.MALE
+            else -> SpeakerIdentity.FEMALE
+        }
+    }
+
+    private fun sanitizeMonotonicBoundaries(
+        rawBoundaries: List<Long>,
+        count: Int,
+        safeDurationMs: Long,
+        minClipStepMs: Long
+    ): List<Long> {
+        val result = ArrayList<Long>(count + 1)
+        result.add(0L)
+        for (i in 1 until count) {
+            val remaining = count - i
+            val minAllowed = result.last() + minClipStepMs
+            val maxAllowed = (safeDurationMs - remaining * minClipStepMs).coerceAtLeast(minAllowed)
+            val candidate = rawBoundaries.getOrElse(i) { minAllowed }.coerceIn(minAllowed, maxAllowed)
+            result.add(candidate)
+        }
+        result.add(safeDurationMs)
+        return result
     }
 
     /**

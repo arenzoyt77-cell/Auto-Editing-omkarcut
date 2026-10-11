@@ -41,6 +41,15 @@ class AutoCutPreferences(private val context: Context) {
             ?.split(",")
             ?.mapNotNull { it.trim().toLongOrNull() }
             ?: emptyList()
+        val storedTranscript = prefs[KEY_SUPPLIED_SPLIT_TRANSCRIPT]
+        val resolvedTranscript = if (
+            storedTranscript.isNullOrBlank() ||
+            storedTranscript.trim() == AutoCutConfig.LEGACY_5_CLIP_SPLIT_TRANSCRIPT.trim()
+        ) {
+            AutoCutConfig.DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT
+        } else {
+            storedTranscript
+        }
         AutoCutConfig(
             minSegmentDurationMs = prefs[KEY_MIN_SEGMENT_MS] ?: 650L,
             minZoom = 1.00f,
@@ -53,8 +62,7 @@ class AutoCutPreferences(private val context: Context) {
             burnHudTelemetryOnExport = prefs[KEY_BURN_HUD] ?: false,
             exportOriginal4kResolution = prefs[KEY_EXPORT_ORIGINAL_4K] ?: false,
             enforceExactKeyframeSettings = prefs[KEY_ENFORCE_EXACT_KEYFRAMES] ?: true,
-            suppliedSplitTranscript = prefs[KEY_SUPPLIED_SPLIT_TRANSCRIPT]
-                ?: AutoCutConfig.DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT,
+            suppliedSplitTranscript = resolvedTranscript,
             exactKeyframeTimestampsMs = parsedTimestamps
         )
     }

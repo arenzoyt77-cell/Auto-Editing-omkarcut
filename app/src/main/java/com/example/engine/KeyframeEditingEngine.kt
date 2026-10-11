@@ -175,6 +175,7 @@ class KeyframeEditingEngine {
 
             // Rule 2: Assign the exact fixed LEFT/RIGHT preset to each clip according to its chronological index
             val direction = fixedDirectionForClipIndex(i, config.fixedDirectionPresets)
+            val cleanPhrase = ExplicitSplitMarkerParser.stripSplitMarkers(raw.spokenPhrase)
 
             if (config.enforceExactKeyframeSettings) {
                 // Rule 3, 4, 5, 6: Preserve the three specified keyframe values in their intended order
@@ -189,7 +190,7 @@ class KeyframeEditingEngine {
                         index = i,
                         startMs = raw.startMs,
                         endMs = raw.endMs,
-                        spokenPhrase = raw.spokenPhrase,
+                        spokenPhrase = cleanPhrase,
                         speechConfidence = raw.confidence,
                         peakDb = raw.peakDb,
                         subjectRegion = subject,
@@ -208,7 +209,9 @@ class KeyframeEditingEngine {
                         autoDefaultSubjectX = subject.startCenterX,
                         autoDefaultSubjectY = subject.startCenterY,
                         autoDefaultStartMs = raw.startMs,
-                        autoDefaultEndMs = raw.endMs
+                        autoDefaultEndMs = raw.endMs,
+                        alignmentStatus = raw.alignmentStatus,
+                        needsTimingCorrection = raw.needsCorrection
                     )
                 )
                 continue
@@ -297,7 +300,7 @@ class KeyframeEditingEngine {
                     index = i,
                     startMs = raw.startMs,
                     endMs = raw.endMs,
-                    spokenPhrase = raw.spokenPhrase,
+                    spokenPhrase = cleanPhrase,
                     speechConfidence = raw.confidence,
                     peakDb = raw.peakDb,
                     subjectRegion = subject,
@@ -316,7 +319,9 @@ class KeyframeEditingEngine {
                     autoDefaultSubjectX = subject.startCenterX,
                     autoDefaultSubjectY = subject.startCenterY,
                     autoDefaultStartMs = raw.startMs,
-                    autoDefaultEndMs = raw.endMs
+                    autoDefaultEndMs = raw.endMs,
+                    alignmentStatus = raw.alignmentStatus,
+                    needsTimingCorrection = raw.needsCorrection
                 )
             )
         }
@@ -570,11 +575,16 @@ class KeyframeEditingEngine {
             else -> 0.62f
         }
 
+        val spanMs = (endMs - startMs).coerceAtLeast(20L)
+        val minPeakMs = startMs + min(80L, spanMs / 4L)
+        val maxPeakMs = max(minPeakMs, endMs - min(120L, spanMs / 3L))
         val zoomStartTimeMs = startMs
-        val zoomPeakTimeMs = (startMs + (durationMs * peakStartNorm).roundToLong())
-            .coerceIn(startMs + 80L, endMs - 120L)
-        val zoomHoldEndTimeMs = (startMs + (durationMs * holdEndNorm).roundToLong())
-            .coerceIn(zoomPeakTimeMs + 40L, endMs - 80L)
+        val zoomPeakTimeMs = (startMs + (spanMs * peakStartNorm).roundToLong())
+            .coerceIn(minPeakMs, maxPeakMs)
+        val minHoldMs = min(endMs, zoomPeakTimeMs + min(40L, spanMs / 5L))
+        val maxHoldMs = max(minHoldMs, endMs - min(80L, spanMs / 4L))
+        val zoomHoldEndTimeMs = (startMs + (spanMs * holdEndNorm).roundToLong())
+            .coerceIn(minHoldMs, maxHoldMs)
         val zoomEndTimeMs = endMs
 
         return SegmentZoomTiming(

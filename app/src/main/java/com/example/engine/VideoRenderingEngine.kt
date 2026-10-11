@@ -713,13 +713,14 @@ class VideoRenderingEngine(
                                 canvas.drawRoundRect(badgeRect, 14f, 14f, hudBgPaint)
                                 canvas.drawRoundRect(badgeRect, 14f, 14f, hudBorderPaint)
                                 val dirArrow = if (segment.cameraDirection == CameraDirection.RIGHT) "→ RIGHT" else "← LEFT"
+                                val cleanPhrase = SpeechTranscriptionEngine.stripSplitMarkers(segment.spokenPhrase)
                                 val hudStr = String.format(
                                     Locale.US,
                                     "SEG %d • %s • %.2fx • %s",
                                     segIdx + 1,
                                     dirArrow,
                                     transform.zoom,
-                                    segment.spokenPhrase
+                                    cleanPhrase
                                 )
                                 canvas.drawText(hudStr, 44f, 68f, hudTextPaint)
                             }
