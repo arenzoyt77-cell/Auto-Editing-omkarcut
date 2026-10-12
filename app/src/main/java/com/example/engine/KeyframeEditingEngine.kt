@@ -23,55 +23,74 @@ class KeyframeEditingEngine {
 
     companion object {
         /**
-         * Exact Keyframe 1: X "+5", Y "-1", Zoom "101%"
+         * Exact RIGHT preset keyframe: X = -87, Y = +18, Zoom = 117%
          */
-        val EXACT_KEYFRAME_1 = CameraKeyframe(
+        val RIGHT_PRESET_KEYFRAME = CameraKeyframe(
             normalizedTime = 0.0f,
-            zoom = 1.01f,
-            focusX = KeyframeCoordinateMapper.offsetXToFocusX(5, 1.01f),
-            focusY = KeyframeCoordinateMapper.offsetYToFocusY(-1, 1.01f),
+            zoom = CameraDirection.RIGHT.presetZoom,
+            focusX = KeyframeCoordinateMapper.offsetXToFocusX(
+                CameraDirection.RIGHT.presetOffsetX,
+                CameraDirection.RIGHT.presetZoom
+            ),
+            focusY = KeyframeCoordinateMapper.offsetYToFocusY(
+                CameraDirection.RIGHT.presetOffsetY,
+                CameraDirection.RIGHT.presetZoom
+            ),
             label = "Keyframe 1",
             timestampMs = CameraKeyframe.UNSET_TIMESTAMP_MS,
             hasExplicitTimestamp = false,
-            offsetX = 5,
-            offsetY = -1,
-            zoomPercent = 101,
+            offsetX = CameraDirection.RIGHT.presetOffsetX,
+            offsetY = CameraDirection.RIGHT.presetOffsetY,
+            zoomPercent = CameraDirection.RIGHT.presetZoomPercent,
             isExactPreset = true
         )
 
         /**
-         * Exact Keyframe 2: X "+179", Y "-58", Zoom "142%"
+         * Exact LEFT preset keyframe: X = +43, Y = -14, Zoom = 108%
          */
-        val EXACT_KEYFRAME_2 = CameraKeyframe(
-            normalizedTime = 0.5f,
-            zoom = 1.42f,
-            focusX = KeyframeCoordinateMapper.offsetXToFocusX(179, 1.42f),
-            focusY = KeyframeCoordinateMapper.offsetYToFocusY(-58, 1.42f),
-            label = "Keyframe 2",
+        val LEFT_PRESET_KEYFRAME = CameraKeyframe(
+            normalizedTime = 0.0f,
+            zoom = CameraDirection.LEFT.presetZoom,
+            focusX = KeyframeCoordinateMapper.offsetXToFocusX(
+                CameraDirection.LEFT.presetOffsetX,
+                CameraDirection.LEFT.presetZoom
+            ),
+            focusY = KeyframeCoordinateMapper.offsetYToFocusY(
+                CameraDirection.LEFT.presetOffsetY,
+                CameraDirection.LEFT.presetZoom
+            ),
+            label = "Keyframe 1",
             timestampMs = CameraKeyframe.UNSET_TIMESTAMP_MS,
             hasExplicitTimestamp = false,
-            offsetX = 179,
-            offsetY = -58,
-            zoomPercent = 142,
+            offsetX = CameraDirection.LEFT.presetOffsetX,
+            offsetY = CameraDirection.LEFT.presetOffsetY,
+            zoomPercent = CameraDirection.LEFT.presetZoomPercent,
             isExactPreset = true
         )
 
         /**
-         * Exact Keyframe 3: X "-160", Y "-102", Zoom "140%"
+         * Exact CENTER preset keyframe: X = +0, Y = +0, Zoom = 100%
          */
-        val EXACT_KEYFRAME_3 = CameraKeyframe(
-            normalizedTime = 1.0f,
-            zoom = 1.40f,
-            focusX = KeyframeCoordinateMapper.offsetXToFocusX(-160, 1.40f),
-            focusY = KeyframeCoordinateMapper.offsetYToFocusY(-102, 1.40f),
-            label = "Keyframe 3",
+        val CENTER_PRESET_KEYFRAME = CameraKeyframe(
+            normalizedTime = 0.0f,
+            zoom = CameraDirection.CENTER.presetZoom,
+            focusX = 0.5f,
+            focusY = 0.5f,
+            label = "Keyframe 1",
             timestampMs = CameraKeyframe.UNSET_TIMESTAMP_MS,
             hasExplicitTimestamp = false,
-            offsetX = -160,
-            offsetY = -102,
-            zoomPercent = 140,
+            offsetX = CameraDirection.CENTER.presetOffsetX,
+            offsetY = CameraDirection.CENTER.presetOffsetY,
+            zoomPercent = CameraDirection.CENTER.presetZoomPercent,
             isExactPreset = true
         )
+
+        /**
+         * Legacy 3-keyframe constants preserved for backward compatibility if referenced directly.
+         */
+        val EXACT_KEYFRAME_1 = RIGHT_PRESET_KEYFRAME
+        val EXACT_KEYFRAME_2 = RIGHT_PRESET_KEYFRAME.copy(normalizedTime = 0.5f, label = "Keyframe 2")
+        val EXACT_KEYFRAME_3 = RIGHT_PRESET_KEYFRAME.copy(normalizedTime = 1.0f, label = "Keyframe 3")
 
         val EXACT_KEYFRAME_SEQUENCE: List<CameraKeyframe> = listOf(
             EXACT_KEYFRAME_1,
@@ -80,7 +99,12 @@ class KeyframeEditingEngine {
         )
 
         /**
-         * Assigns the exact fixed LEFT/RIGHT preset to each clip according to its chronological index.
+         * Assigns the exact fixed LEFT/RIGHT preset to each clip according to its chronological index:
+         * Clip 1 (index 0) -> RIGHT (X = -87, Y = +18, Zoom = 117%)
+         * Clip 2 (index 1) -> LEFT  (X = +43, Y = -14, Zoom = 108%)
+         * Clip 3 (index 2) -> RIGHT (X = -87, Y = +18, Zoom = 117%)
+         * Clip 4 (index 3) -> LEFT  (X = +43, Y = -14, Zoom = 108%)
+         * Continues alternating until the final clip.
          */
         fun fixedDirectionForClipIndex(
             clipIndex: Int,
@@ -93,41 +117,101 @@ class KeyframeEditingEngine {
         }
 
         /**
-         * Builds the three exact specified keyframes in their intended order:
-         * - Keyframe 1: X "+5", Y "-1", Zoom "101%"
-         * - Keyframe 2: X "+179", Y "-58", Zoom "142%"
-         * - Keyframe 3: X "-160", Y "-102", Zoom "140%"
-         * Never invents timestamps when `explicitTimestampsMs` is not supplied.
+         * Builds a single exact preset keyframe for the given [direction] (RIGHT, LEFT, or CENTER)
+         * with accurate normalized crop focus coordinates and pixel offsets.
          */
-        fun buildExactKeyframeSequence(
+        fun buildPresetKeyframeForDirection(
+            direction: CameraDirection,
+            normalizedTime: Float,
+            label: String,
+            timestampMs: Long = CameraKeyframe.UNSET_TIMESTAMP_MS,
+            hasExplicitTimestamp: Boolean = timestampMs >= 0L
+        ): CameraKeyframe {
+            val zoom = KeyframeCoordinateMapper.zoomPercentToScale(direction.presetZoomPercent)
+            val focusX = KeyframeCoordinateMapper.offsetXToFocusX(direction.presetOffsetX, zoom)
+            val focusY = KeyframeCoordinateMapper.offsetYToFocusY(direction.presetOffsetY, zoom)
+            return CameraKeyframe(
+                normalizedTime = normalizedTime,
+                zoom = zoom,
+                focusX = focusX,
+                focusY = focusY,
+                label = label,
+                timestampMs = if (hasExplicitTimestamp) timestampMs else CameraKeyframe.UNSET_TIMESTAMP_MS,
+                hasExplicitTimestamp = hasExplicitTimestamp,
+                offsetX = direction.presetOffsetX,
+                offsetY = direction.presetOffsetY,
+                zoomPercent = direction.presetZoomPercent,
+                isExactPreset = true
+            )
+        }
+
+        /**
+         * Builds the clip's keyframe sequence storing the exact preset values for [direction]:
+         * - RIGHT: X = -87, Y = +18, Zoom = 117%
+         * - LEFT:  X = +43, Y = -14, Zoom = 108%
+         */
+        fun buildPresetKeyframesForDirection(
+            direction: CameraDirection,
+            startMs: Long = CameraKeyframe.UNSET_TIMESTAMP_MS,
+            endMs: Long = CameraKeyframe.UNSET_TIMESTAMP_MS,
             explicitTimestampsMs: List<Long> = emptyList()
         ): Triple<CameraKeyframe, CameraKeyframe, CameraKeyframe> {
-            val hasExplicit = explicitTimestampsMs.size == 3 && explicitTimestampsMs.all { it >= 0L }
-            val kf1 = if (hasExplicit) {
-                EXACT_KEYFRAME_1.copy(
-                    timestampMs = explicitTimestampsMs[0],
-                    hasExplicitTimestamp = true
-                )
-            } else {
-                EXACT_KEYFRAME_1
+            val hasExplicitList = explicitTimestampsMs.size == 3 && explicitTimestampsMs.all { it >= 0L }
+            val hasClipBounds = startMs >= 0L && endMs >= startMs
+            val midMs = if (hasClipBounds) startMs + ((endMs - startMs) / 2L) else CameraKeyframe.UNSET_TIMESTAMP_MS
+
+            val t1 = when {
+                hasExplicitList -> explicitTimestampsMs[0]
+                hasClipBounds -> startMs
+                else -> CameraKeyframe.UNSET_TIMESTAMP_MS
             }
-            val kf2 = if (hasExplicit) {
-                EXACT_KEYFRAME_2.copy(
-                    timestampMs = explicitTimestampsMs[1],
-                    hasExplicitTimestamp = true
-                )
-            } else {
-                EXACT_KEYFRAME_2
+            val t2 = when {
+                hasExplicitList -> explicitTimestampsMs[1]
+                hasClipBounds -> midMs
+                else -> CameraKeyframe.UNSET_TIMESTAMP_MS
             }
-            val kf3 = if (hasExplicit) {
-                EXACT_KEYFRAME_3.copy(
-                    timestampMs = explicitTimestampsMs[2],
-                    hasExplicitTimestamp = true
-                )
-            } else {
-                EXACT_KEYFRAME_3
+            val t3 = when {
+                hasExplicitList -> explicitTimestampsMs[2]
+                hasClipBounds -> endMs
+                else -> CameraKeyframe.UNSET_TIMESTAMP_MS
             }
+            val hasTiming = hasExplicitList || hasClipBounds
+
+            val kf1 = buildPresetKeyframeForDirection(
+                direction = direction,
+                normalizedTime = 0.0f,
+                label = "Keyframe 1",
+                timestampMs = t1,
+                hasExplicitTimestamp = hasTiming
+            )
+            val kf2 = buildPresetKeyframeForDirection(
+                direction = direction,
+                normalizedTime = 0.5f,
+                label = "Keyframe 2",
+                timestampMs = t2,
+                hasExplicitTimestamp = hasTiming
+            )
+            val kf3 = buildPresetKeyframeForDirection(
+                direction = direction,
+                normalizedTime = 1.0f,
+                label = "Keyframe 3",
+                timestampMs = t3,
+                hasExplicitTimestamp = hasTiming
+            )
             return Triple(kf1, kf2, kf3)
+        }
+
+        /**
+         * Builds exact preset keyframes for [direction] (defaults to RIGHT when not specified).
+         */
+        fun buildExactKeyframeSequence(
+            explicitTimestampsMs: List<Long> = emptyList(),
+            direction: CameraDirection = CameraDirection.RIGHT
+        ): Triple<CameraKeyframe, CameraKeyframe, CameraKeyframe> {
+            return buildPresetKeyframesForDirection(
+                direction = direction,
+                explicitTimestampsMs = explicitTimestampsMs
+            )
         }
     }
 
@@ -173,16 +257,22 @@ class KeyframeEditingEngine {
                 )
             }
 
-            // Rule 2: Assign the exact fixed LEFT/RIGHT preset to each clip according to its chronological index
+            // Assign the exact fixed RIGHT/LEFT preset to each clip in chronological order:
+            // Clip 1 RIGHT (X = -87, Y = +18, Zoom = 117%), Clip 2 LEFT (X = +43, Y = -14, Zoom = 108%), ...
             val direction = fixedDirectionForClipIndex(i, config.fixedDirectionPresets)
             val cleanPhrase = ExplicitSplitMarkerParser.stripSplitMarkers(raw.spokenPhrase)
 
             if (config.enforceExactKeyframeSettings) {
-                // Rule 3, 4, 5, 6: Preserve the three specified keyframe values in their intended order
-                // without replacing them with AI-estimated values or inventing keyframe timestamps.
-                val (kf1, kf2, kf3) = buildExactKeyframeSequence(config.exactKeyframeTimestampsMs)
+                // Store the exact RIGHT / LEFT preset values directly in the clip's transform and keyframes
+                // without changing them based on speaker identity, scene, or AI estimates.
+                val (kf1, kf2, kf3) = buildPresetKeyframesForDirection(
+                    direction = direction,
+                    startMs = raw.startMs,
+                    endMs = raw.endMs,
+                    explicitTimestampsMs = config.exactKeyframeTimestampsMs
+                )
                 val midMs = raw.startMs + ((raw.endMs - raw.startMs) / 2L)
-                val resolvedPeakTimeMs = if (kf2.hasExplicitTimestamp) kf2.timestampMs else midMs
+                val resolvedPeakTimeMs = if (kf2.hasExplicitTimestamp && kf2.timestampMs >= 0L) kf2.timestampMs else midMs
 
                 segments.add(
                     VideoSegment(
@@ -197,15 +287,19 @@ class KeyframeEditingEngine {
                         cameraDirection = direction,
                         keyframeA = kf1,
                         keyframeB = kf2,
-                        smartZoomPeak = kf2.zoom,
-                        zoomStartTimeMs = if (kf1.hasExplicitTimestamp) kf1.timestampMs else raw.startMs,
+                        smartZoomPeak = direction.presetZoom,
+                        zoomStartTimeMs = if (kf1.hasExplicitTimestamp && kf1.timestampMs >= 0L) kf1.timestampMs else raw.startMs,
                         zoomPeakTimeMs = resolvedPeakTimeMs,
                         zoomHoldEndTimeMs = resolvedPeakTimeMs,
-                        zoomEndTimeMs = if (kf3.hasExplicitTimestamp) kf3.timestampMs else raw.endMs,
+                        zoomEndTimeMs = if (kf3.hasExplicitTimestamp && kf3.timestampMs >= 0L) kf3.timestampMs else raw.endMs,
                         endKeyframe = kf3,
+                        presetOffsetX = direction.presetOffsetX,
+                        presetOffsetY = direction.presetOffsetY,
+                        presetZoomPercent = direction.presetZoomPercent,
+                        presetZoom = direction.presetZoom,
                         isModifiedManually = false,
                         autoDefaultDirection = direction,
-                        autoDefaultZoomPeak = kf2.zoom,
+                        autoDefaultZoomPeak = direction.presetZoom,
                         autoDefaultSubjectX = subject.startCenterX,
                         autoDefaultSubjectY = subject.startCenterY,
                         autoDefaultStartMs = raw.startMs,
@@ -364,31 +458,43 @@ class KeyframeEditingEngine {
                 details.add("Clip ${idx + 1}: expected preset $expectedDir but found ${seg.cameraDirection}")
             }
 
+            val expOffsetX = expectedDir.presetOffsetX
+            val expOffsetY = expectedDir.presetOffsetY
+            val expZoomPct = expectedDir.presetZoomPercent
+            val expZoom = expectedDir.presetZoom
+
+            if (seg.presetOffsetX != expOffsetX ||
+                seg.presetOffsetY != expOffsetY ||
+                seg.presetZoomPercent != expZoomPct ||
+                abs(seg.presetZoom - expZoom) > 1e-4f ||
+                abs(seg.smartZoomPeak - expZoom) > 1e-4f
+            ) {
+                presetsOk = false
+                details.add(
+                    "Clip ${idx + 1}: stored preset (${seg.presetOffsetX}, ${seg.presetOffsetY}, ${seg.presetZoomPercent}%) " +
+                        "does not match expected $expectedDir ($expOffsetX, $expOffsetY, ${expZoomPct}%)"
+                )
+            }
+
             val kfs = seg.keyframes
             if (kfs.size != 3) {
                 keyframesOk = false
                 details.add("Clip ${idx + 1}: expected 3 keyframes in sequence, found ${kfs.size}")
             } else {
-                val kf1 = kfs[0]
-                val kf2 = kfs[1]
-                val kf3 = kfs[2]
-
-                val kf1Match = kf1.offsetX == 5 && kf1.offsetY == -1 && kf1.zoomPercent == 101 &&
-                    kf1.formattedX == "+5" && kf1.formattedY == "-1" && kf1.formattedZoomPercent == "101%"
-                val kf2Match = kf2.offsetX == 179 && kf2.offsetY == -58 && kf2.zoomPercent == 142 &&
-                    kf2.formattedX == "+179" && kf2.formattedY == "-58" && kf2.formattedZoomPercent == "142%"
-                val kf3Match = kf3.offsetX == -160 && kf3.offsetY == -102 && kf3.zoomPercent == 140 &&
-                    kf3.formattedX == "-160" && kf3.formattedY == "-102" && kf3.formattedZoomPercent == "140%"
-
-                if (!kf1Match || !kf2Match || !kf3Match) {
-                    keyframesOk = false
-                    details.add(
-                        "Clip ${idx + 1} keyframe mismatch: " +
-                            "KF1=(${kf1.formattedSummary}), KF2=(${kf2.formattedSummary}), KF3=(${kf3.formattedSummary})"
-                    )
-                }
-
                 for (kf in kfs) {
+                    val kfMatch = kf.offsetX == expOffsetX &&
+                        kf.offsetY == expOffsetY &&
+                        kf.zoomPercent == expZoomPct &&
+                        abs(kf.zoom - expZoom) <= 1e-4f &&
+                        KeyframeCoordinateMapper.focusXToOffsetX(kf.focusX, kf.zoom) == expOffsetX &&
+                        KeyframeCoordinateMapper.focusYToOffsetY(kf.focusY, kf.zoom) == expOffsetY
+                    if (!kfMatch) {
+                        keyframesOk = false
+                        details.add(
+                            "Clip ${idx + 1} (${expectedDir.name}) ${kf.label} mismatch: " +
+                                "found (${kf.formattedSummary}), expected (X \"${expectedDir.formattedPresetX}\", Y \"${expectedDir.formattedPresetY}\", Zoom \"${expectedDir.formattedPresetZoom}\")"
+                        )
+                    }
                     if (!kf.hasExplicitTimestamp) {
                         allExplicitTiming = false
                         if (kf.timestampMs != CameraKeyframe.UNSET_TIMESTAMP_MS) {
@@ -398,13 +504,32 @@ class KeyframeEditingEngine {
                     }
                 }
             }
+
+            // Also verify that evaluating the live transform on this clip produces the exact preset values
+            val midTimeUs = ((seg.startMs + seg.endMs) * 500L)
+            val evaluated = evaluateTransformAtUs(
+                segments = segments,
+                positionUs = midTimeUs,
+                segmentIndexHint = idx
+            )
+            if (evaluated.direction != expectedDir ||
+                evaluated.offsetX != expOffsetX ||
+                evaluated.offsetY != expOffsetY ||
+                evaluated.zoomPercent != expZoomPct ||
+                abs(evaluated.zoom - expZoom) > 1e-4f ||
+                abs(KeyframeCoordinateMapper.computeViewportTranslationX(evaluated, 1080f) - expOffsetX.toFloat()) > 0.05f ||
+                abs(KeyframeCoordinateMapper.computeViewportTranslationY(evaluated, 1920f) - expOffsetY.toFloat()) > 0.05f
+            ) {
+                keyframesOk = false
+                details.add(
+                    "Clip ${idx + 1} evaluated transform mismatch: " +
+                        "offsetX=${evaluated.offsetX}, offsetY=${evaluated.offsetY}, zoom=${evaluated.zoomPercent}%"
+                )
+            }
         }
 
         val limitationMsg = if (!allExplicitTiming) {
-            "Reference keyframe timestamps for Keyframe 1 (X \"+5\", Y \"-1\", Zoom \"101%\"), " +
-                "Keyframe 2 (X \"+179\", Y \"-58\", Zoom \"142%\"), and " +
-                "Keyframe 3 (X \"-160\", Y \"-102\", Zoom \"140%\") cannot be established from the available project data. " +
-                "No timestamps were invented; please provide the exact reference timestamps for Keyframes 1, 2, and 3."
+            "Keyframe timestamps are unset."
         } else {
             null
         }
@@ -620,18 +745,54 @@ class KeyframeEditingEngine {
             endCenterY = (segment.subjectRegion.endCenterY + dy).coerceIn(0.18f, 0.82f)
         )
 
-        // Rule 5: Do not silently overwrite exact preset keyframe values when updating clip direction or split range
+        // Preserve exact preset keyframe values when updating clip direction or split range
         val isZoomUnchanged = abs(newStartZoom - segment.keyframeA.zoom) < 1e-4f &&
             abs(newPeakZoom - segment.smartZoomPeak) < 1e-4f
         if (segment.hasExactKeyframes && isZoomUnchanged) {
             val midMs = segment.startMs + ((segment.endMs - segment.startMs) / 2L)
+            if (newDirection != segment.cameraDirection) {
+                val (kf1, kf2, kf3) = buildPresetKeyframesForDirection(
+                    direction = newDirection,
+                    startMs = segment.startMs,
+                    endMs = segment.endMs
+                )
+                return segment.copy(
+                    subjectRegion = updatedSubject,
+                    cameraDirection = newDirection,
+                    keyframeA = kf1,
+                    keyframeB = kf2,
+                    endKeyframe = kf3,
+                    smartZoomPeak = newDirection.presetZoom,
+                    presetOffsetX = newDirection.presetOffsetX,
+                    presetOffsetY = newDirection.presetOffsetY,
+                    presetZoomPercent = newDirection.presetZoomPercent,
+                    presetZoom = newDirection.presetZoom,
+                    zoomStartTimeMs = segment.startMs,
+                    zoomPeakTimeMs = midMs,
+                    zoomHoldEndTimeMs = midMs,
+                    zoomEndTimeMs = segment.endMs,
+                    isModifiedManually = true
+                )
+            }
             return segment.copy(
                 subjectRegion = updatedSubject,
                 cameraDirection = newDirection,
-                zoomStartTimeMs = if (segment.keyframeA.hasExplicitTimestamp) segment.keyframeA.timestampMs else segment.startMs,
-                zoomPeakTimeMs = if (segment.keyframeB.hasExplicitTimestamp) segment.keyframeB.timestampMs else midMs,
-                zoomHoldEndTimeMs = if (segment.keyframeB.hasExplicitTimestamp) segment.keyframeB.timestampMs else midMs,
-                zoomEndTimeMs = if (segment.endKeyframe.hasExplicitTimestamp) segment.endKeyframe.timestampMs else segment.endMs,
+                keyframeA = segment.keyframeA.copy(
+                    timestampMs = segment.startMs,
+                    hasExplicitTimestamp = true
+                ),
+                keyframeB = segment.keyframeB.copy(
+                    timestampMs = midMs,
+                    hasExplicitTimestamp = true
+                ),
+                endKeyframe = segment.endKeyframe.copy(
+                    timestampMs = segment.endMs,
+                    hasExplicitTimestamp = true
+                ),
+                zoomStartTimeMs = segment.startMs,
+                zoomPeakTimeMs = midMs,
+                zoomHoldEndTimeMs = midMs,
+                zoomEndTimeMs = segment.endMs,
                 isModifiedManually = true
             )
         }
@@ -1074,7 +1235,9 @@ class KeyframeEditingEngine {
             spokenPhrase = activeSeg.spokenPhrase,
             offsetX = currentOffsetXFloat.roundToInt(),
             offsetY = currentOffsetYFloat.roundToInt(),
-            zoomPercent = (currentZoom * 100f).roundToInt()
+            zoomPercent = (currentZoom * 100f).roundToInt(),
+            offsetXFloat = currentOffsetXFloat,
+            offsetYFloat = currentOffsetYFloat
         )
     }
 

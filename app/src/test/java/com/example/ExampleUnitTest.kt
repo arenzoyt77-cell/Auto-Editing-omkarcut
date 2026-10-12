@@ -521,146 +521,164 @@ class ExampleUnitTest {
         val speechEngine = SpeechTranscriptionEngine()
         val keyframeEngine = KeyframeEditingEngine()
 
-        // Rule 1: Sentence splitting must follow the supplied "(split)" boundaries.
+        // BUG 1: Sentence splitting must strictly follow the supplied "(split)" boundaries
+        // and keep multi-sentence marked groups together without splitting on punctuation or tiny pauses.
         val defaultHindiGroups = speechEngine.splitTranscriptBySuppliedMarkers(AutoCutConfig.DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT)
-        assertEquals(5, defaultHindiGroups.size)
-        assertEquals("हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं।", defaultHindiGroups[0])
+        assertEquals(26, defaultHindiGroups.size)
+        assertEquals("अरे रुको", defaultHindiGroups[0])
+        assertEquals("क्यों? क्या हुई?", defaultHindiGroups[1])
+        assertEquals("अरे मेरे को हेडशॉट मत मारना।", defaultHindiGroups[2])
+        assertEquals("हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं।", defaultHindiGroups[3])
+        assertEquals("पसंद नहीं है। पसंद मुझे लूडो भी नहीं है। लेकिन खेलता हूं ना।", defaultHindiGroups[10])
+        assertEquals("आज के बाद तुम वही खेलना। ठीक है। चलो थैंक यू बोलो।", defaultHindiGroups[13])
+        assertEquals("बड़े समझदारी है। तुरंत बोल दिया। अब आई लव यू बोलो।", defaultHindiGroups[15])
+        assertEquals("अब ये वन के वाला कौन है? हमसे ज्यादा्राइबर कर लिए। अरे सुनो।", defaultHindiGroups[21])
+        assertEquals("मेरे 11्राइबर हैं। आप सब्सक्राइब कर देना तो 12 हो जाएंगे। सहेली से बोल देना 13 हो जाएंगे।", defaultHindiGroups[23])
+        assertEquals("आई लव यू बोल देना तो 2 मिलियन हो जाएंगे।", defaultHindiGroups[25])
 
-        val suppliedTranscript =
-            "Are ruko! (split) Are merko headshot mat marna (split) Headshot humko nahi aata hum tukka shot maarte hain (split) Main toh marunga, Jaggu dada bolenge... (split) Are meri minus lag jayegi"
-        val splitPhrases = speechEngine.splitTranscriptBySuppliedMarkers(suppliedTranscript)
-        assertEquals(5, splitPhrases.size)
-        assertEquals("Are ruko!", splitPhrases[0])
-        assertEquals("Are merko headshot mat marna", splitPhrases[1])
-        assertEquals("Headshot humko nahi aata hum tukka shot maarte hain", splitPhrases[2])
-        assertEquals("Main toh marunga, Jaggu dada bolenge...", splitPhrases[3])
-        assertEquals("Are meri minus lag jayegi", splitPhrases[4])
+        // Synthesize realistic speech envelope with inter-line pause valleys and intra-line short breath dips
+        val totalDurationMs = 52_000L
+        val windowMs = 20L
+        val totalWindows = (totalDurationMs / windowMs).toInt()
+        val vocalRmsBins = FloatArray(totalWindows) { w ->
+            val tMs = w * windowMs
+            // Active speech carrier with syllable modulations
+            val syllableMod = 0.45f + 0.30f * kotlin.math.sin(tMs / 95.0).toFloat()
+            syllableMod.coerceIn(0.12f, 0.85f)
+        }
 
         val rawSegments = speechEngine.createSegmentsFromSuppliedSplits(
-            transcriptWithSplits = suppliedTranscript,
-            totalDurationMs = 15_000L
+            transcriptWithSplits = AutoCutConfig.DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT,
+            totalDurationMs = totalDurationMs,
+            vocalRmsBins = vocalRmsBins,
+            windowMs = windowMs,
+            fps = 30f
         )
-        assertEquals("Sentence splitting must produce 5 clips matching supplied (split) boundaries", 5, rawSegments.size)
+        assertEquals("Must produce 26 clips matching the 26 (split) groups", 26, rawSegments.size)
         assertEquals(0L, rawSegments.first().startMs)
-        assertEquals(15_000L, rawSegments.last().endMs)
+        assertEquals(totalDurationMs, rawSegments.last().endMs)
+
+        // Verify contiguity, total duration preservation, and non-equal speech-weighted durations
+        val splitValidation = speechEngine.validateSplitSegmentation(
+            transcriptWithSplits = AutoCutConfig.DEFAULT_SUPPLIED_SPLIT_TRANSCRIPT,
+            rawSegments = rawSegments,
+            totalDurationMs = totalDurationMs
+        )
+        assertTrue("Split validation must pass: ${splitValidation.details}", splitValidation.isValid)
+        val clipDurations = rawSegments.map { it.endMs - it.startMs }
+        assertTrue(
+            "Multi-sentence clip #24 must have longer duration than single-word clip #17 (no equal-duration splits)",
+            clipDurations[23] > clipDurations[16] * 2
+        )
 
         // Generate timeline using default AutoCutConfig (enforceExactKeyframeSettings = true by default)
-        val subjects = rawSegments.map {
-            SubjectRegion(0.50f, 0.48f, 0.52f, 0.48f, 0.34f, 0.42f, 0.14f, 0.92f)
+        // Intentionally pass varied speaker identities and subject regions to verify presets NEVER change
+        // based on speaker identity, scene, or AI estimates.
+        val subjects = rawSegments.mapIndexed { idx, _ ->
+            SubjectRegion(
+                startCenterX = if (idx % 3 == 0) 0.32f else 0.68f,
+                startCenterY = 0.48f,
+                endCenterX = 0.52f,
+                endCenterY = 0.48f,
+                widthRatio = 0.34f,
+                heightRatio = 0.42f,
+                motionMagnitude = 0.14f,
+                confidence = 0.92f
+            )
         }
         val timeline = keyframeEngine.generateSegmentedTimeline(
             rawSegments = rawSegments,
             subjectRegions = subjects,
             config = AutoCutConfig()
         )
-        assertEquals(5, timeline.size)
+        assertEquals(26, timeline.size)
 
-        // Rule 2: Assign the exact fixed LEFT/RIGHT preset to each clip according to its chronological index.
-        assertEquals(CameraDirection.RIGHT, timeline[0].cameraDirection)
-        assertEquals(CameraDirection.LEFT, timeline[1].cameraDirection)
-        assertEquals(CameraDirection.RIGHT, timeline[2].cameraDirection)
-        assertEquals(CameraDirection.LEFT, timeline[3].cameraDirection)
-        assertEquals(CameraDirection.RIGHT, timeline[4].cameraDirection)
+        // BUG 2: Verify exact alternating RIGHT/LEFT presets across all 26 clips in chronological order:
+        // RIGHT: X = -87, Y = +18, Zoom = 117%
+        // LEFT:  X = +43, Y = -14, Zoom = 108%
+        // Sequence: Clip 1 RIGHT, Clip 2 LEFT, Clip 3 RIGHT, Clip 4 LEFT ... Clip 26 LEFT
+        for ((idx, seg) in timeline.withIndex()) {
+            val expectedDir = if (idx % 2 == 0) CameraDirection.RIGHT else CameraDirection.LEFT
+            val expX = if (expectedDir == CameraDirection.RIGHT) -87 else 43
+            val expY = if (expectedDir == CameraDirection.RIGHT) 18 else -14
+            val expZoomPct = if (expectedDir == CameraDirection.RIGHT) 117 else 108
+            val expZoom = expZoomPct / 100f
+            val expFormattedX = if (expectedDir == CameraDirection.RIGHT) "-87" else "+43"
+            val expFormattedY = if (expectedDir == CameraDirection.RIGHT) "+18" else "-14"
+            val expFormattedZoom = "${expZoomPct}%"
 
-        // Rule 3 & Rule 4: Preserve the three specified keyframe values exactly and in their intended order:
-        // - Keyframe 1: X "+5", Y "-1", Zoom "101%"
-        // - Keyframe 2: X "+179", Y "-58", Zoom "142%"
-        // - Keyframe 3: X "-160", Y "-102", Zoom "140%"
-        for (seg in timeline) {
-            assertTrue("Clip must be flagged as having exact preset keyframes", seg.hasExactKeyframes)
-            assertEquals(3, seg.keyframes.size)
+            assertEquals("Clip ${idx + 1} must have preset $expectedDir", expectedDir, seg.cameraDirection)
+            assertEquals("Clip ${idx + 1} presetOffsetX", expX, seg.presetOffsetX)
+            assertEquals("Clip ${idx + 1} presetOffsetY", expY, seg.presetOffsetY)
+            assertEquals("Clip ${idx + 1} presetZoomPercent", expZoomPct, seg.presetZoomPercent)
+            assertEquals("Clip ${idx + 1} presetZoom", expZoom, seg.presetZoom, 1e-4f)
+            assertEquals("Clip ${idx + 1} smartZoomPeak", expZoom, seg.smartZoomPeak, 1e-4f)
+            assertTrue("Clip ${idx + 1} must be flagged as having exact preset keyframes", seg.hasExactKeyframes)
+            assertTrue("Clip ${idx + 1} must have exact preset transform", seg.hasExactPresetTransform)
 
-            val kf1 = seg.keyframes[0]
-            val kf2 = seg.keyframes[1]
-            val kf3 = seg.keyframes[2]
+            // Verify keyframes store the exact preset transform values and accurate focusX/focusY
+            for (kf in seg.keyframes) {
+                assertEquals(expX, kf.offsetX)
+                assertEquals(expY, kf.offsetY)
+                assertEquals(expZoomPct, kf.zoomPercent)
+                assertEquals(expZoom, kf.zoom, 1e-4f)
+                assertEquals(expFormattedX, kf.formattedX)
+                assertEquals(expFormattedY, kf.formattedY)
+                assertEquals(expFormattedZoom, kf.formattedZoomPercent)
+                assertEquals(
+                    "focusX must round-trip to exact offsetX",
+                    expX,
+                    com.example.model.KeyframeCoordinateMapper.focusXToOffsetX(kf.focusX, kf.zoom)
+                )
+                assertEquals(
+                    "focusY must round-trip to exact offsetY",
+                    expY,
+                    com.example.model.KeyframeCoordinateMapper.focusYToOffsetY(kf.focusY, kf.zoom)
+                )
+            }
 
-            assertEquals("+5", kf1.formattedX)
-            assertEquals("-1", kf1.formattedY)
-            assertEquals("101%", kf1.formattedZoomPercent)
-            assertEquals(5, kf1.offsetX)
-            assertEquals(-1, kf1.offsetY)
-            assertEquals(101, kf1.zoomPercent)
-            assertEquals(1.01f, kf1.zoom, 1e-4f)
+            // Verify evaluated transform at start, midpoint, and end of clip
+            val midUs = ((seg.startMs + seg.endMs) * 1000L) / 2L
+            val evalMid = keyframeEngine.evaluateTransformAtUs(timeline, midUs, EasingType.CUBIC_HERMITE, idx)
+            assertEquals(expectedDir, evalMid.direction)
+            assertEquals(expX, evalMid.offsetX)
+            assertEquals(expY, evalMid.offsetY)
+            assertEquals(expZoomPct, evalMid.zoomPercent)
+            assertEquals(expZoom, evalMid.zoom, 1e-4f)
 
-            assertEquals("+179", kf2.formattedX)
-            assertEquals("-58", kf2.formattedY)
-            assertEquals("142%", kf2.formattedZoomPercent)
-            assertEquals(179, kf2.offsetX)
-            assertEquals(-58, kf2.offsetY)
-            assertEquals(142, kf2.zoomPercent)
-            assertEquals(1.42f, kf2.zoom, 1e-4f)
+            // Verify preview renderer viewport translation (on 1080x1920 reference canvas)
+            val previewPanX = com.example.model.KeyframeCoordinateMapper.computeViewportTranslationX(evalMid, 1080f)
+            val previewPanY = com.example.model.KeyframeCoordinateMapper.computeViewportTranslationY(evalMid, 1920f)
+            assertEquals("Preview renderer X translation for Clip ${idx + 1}", expX.toFloat(), previewPanX, 0.05f)
+            assertEquals("Preview renderer Y translation for Clip ${idx + 1}", expY.toFloat(), previewPanY, 0.05f)
 
-            assertEquals("-160", kf3.formattedX)
-            assertEquals("-102", kf3.formattedY)
-            assertEquals("140%", kf3.formattedZoomPercent)
-            assertEquals(-160, kf3.offsetX)
-            assertEquals(-102, kf3.offsetY)
-            assertEquals(140, kf3.zoomPercent)
-            assertEquals(1.40f, kf3.zoom, 1e-4f)
-
-            // Rule 6: Do not invent keyframe timestamps when reference timing is not provided
-            assertFalse("KF1 must not invent an explicit timestamp", kf1.hasExplicitTimestamp)
-            assertFalse("KF2 must not invent an explicit timestamp", kf2.hasExplicitTimestamp)
-            assertFalse("KF3 must not invent an explicit timestamp", kf3.hasExplicitTimestamp)
-            assertEquals(com.example.model.CameraKeyframe.UNSET_TIMESTAMP_MS, kf1.timestampMs)
-            assertEquals(com.example.model.CameraKeyframe.UNSET_TIMESTAMP_MS, kf2.timestampMs)
-            assertEquals(com.example.model.CameraKeyframe.UNSET_TIMESTAMP_MS, kf3.timestampMs)
+            // Verify export renderer frame transform matches preview renderer
+            val exportParams = VideoRenderingEngine.computeFrameRenderTransformParams(
+                sourceWidth = 1080,
+                sourceHeight = 1920,
+                outWidth = 1080,
+                outHeight = 1920,
+                transform = evalMid
+            )
+            assertEquals("Export renderer scale for Clip ${idx + 1}", expZoom, exportParams.totalScale, 1e-4f)
+            assertEquals("Export renderer X translation for Clip ${idx + 1}", previewPanX, exportParams.translationX, 1e-4f)
+            assertEquals("Export renderer Y translation for Clip ${idx + 1}", previewPanY, exportParams.translationY, 1e-4f)
         }
 
-        // Rule 5: Do not silently overwrite either the fixed LEFT/RIGHT settings or the specified keyframe values
-        val afterSync = keyframeEngine.synchronizeConsecutiveBoundaryKeyframes(timeline)
-        val afterTrackingNudge = keyframeEngine.rebuildSegmentKeyframes(
-            segment = afterSync[0],
-            newSubjectX = 0.60f,
-            newSubjectY = 0.44f
+        // Verify frame counts across all 26 clips sum to exact total video frames (zero frame loss or duplication)
+        val frameCounts = VideoRenderingEngine.computeSegmentFrameCounts(timeline, targetCfrFps = 30)
+        assertEquals(26, frameCounts.size)
+        assertTrue(frameCounts.all { it >= 1 })
+        assertEquals(
+            "Total exported frames across 26 clips must match exact 52s @ 30fps (1560 frames)",
+            1560,
+            frameCounts.sum()
         )
-        assertTrue("Exact keyframes must not be overwritten after boundary sync or tracking update", afterTrackingNudge.hasExactKeyframes)
-        assertEquals(CameraDirection.RIGHT, afterTrackingNudge.cameraDirection)
-        assertEquals("+5", afterTrackingNudge.keyframes[0].formattedX)
-        assertEquals("+179", afterTrackingNudge.keyframes[1].formattedX)
-        assertEquals("-160", afterTrackingNudge.keyframes[2].formattedX)
 
-        assertEquals(5, afterSync.size)
-        for ((idx, seg) in afterSync.withIndex()) {
-            assertEquals(KeyframeEditingEngine.fixedDirectionForClipIndex(idx), seg.cameraDirection)
-            assertTrue(seg.hasExactKeyframes)
-            assertEquals("X \"+5\", Y \"-1\", Zoom \"101%\"", seg.keyframes[0].formattedSummary)
-            assertEquals("X \"+179\", Y \"-58\", Zoom \"142%\"", seg.keyframes[1].formattedSummary)
-            assertEquals("X \"-160\", Y \"-102\", Zoom \"140%\"", seg.keyframes[2].formattedSummary)
-        }
-
-        // Rule 7: Validate the final clip settings and keyframe values in the actual implementation
-        val validationReport = keyframeEngine.validateClipAndKeyframeSettings(afterSync)
-        assertTrue("Validation report must pass for exact clip presets & keyframe sequence", validationReport.isValid)
+        // Verify validation report passes
+        val validationReport = keyframeEngine.validateClipAndKeyframeSettings(timeline)
+        assertTrue("Validation report must pass: ${validationReport.details}", validationReport.isValid)
         assertTrue(validationReport.clipsPreserveFixedLeftRightPresets)
         assertTrue(validationReport.keyframesPreserveExactValuesAndOrder)
-        assertFalse("Reference timing is not supplied by default", validationReport.hasExplicitReferenceTiming)
-        assertTrue("No timestamps may be invented when reference timing is missing", validationReport.noInventedTimestampsWhenReferenceMissing)
-        assertTrue(
-            "Validation report must state the missing reference timing limitation",
-            validationReport.missingReferenceTimingLimitation?.contains("cannot be established") == true
-        )
-
-        // Verify evaluateTransformAtUs evaluates exact Keyframe 1, Keyframe 2, and Keyframe 3 in order
-        val seg0 = afterSync[0]
-        val midUs = ((seg0.startMs + seg0.endMs) * 1000L) / 2L
-        val evalKf1 = keyframeEngine.evaluateTransformAtUs(afterSync, seg0.startMs * 1000L, EasingType.CUBIC_HERMITE, 0)
-        val evalKf2 = keyframeEngine.evaluateTransformAtUs(afterSync, midUs, EasingType.CUBIC_HERMITE, 0)
-        val evalKf3 = keyframeEngine.evaluateTransformAtUs(afterSync, seg0.endMs * 1000L, EasingType.CUBIC_HERMITE, 0)
-
-        assertEquals(5, evalKf1.offsetX)
-        assertEquals(-1, evalKf1.offsetY)
-        assertEquals(101, evalKf1.zoomPercent)
-        assertEquals(1.01f, evalKf1.zoom, 1e-4f)
-
-        assertEquals(179, evalKf2.offsetX)
-        assertEquals(-58, evalKf2.offsetY)
-        assertEquals(142, evalKf2.zoomPercent)
-        assertEquals(1.42f, evalKf2.zoom, 1e-4f)
-
-        assertEquals(-160, evalKf3.offsetX)
-        assertEquals(-102, evalKf3.offsetY)
-        assertEquals(140, evalKf3.zoomPercent)
-        assertEquals(1.40f, evalKf3.zoom, 1e-4f)
     }
 }

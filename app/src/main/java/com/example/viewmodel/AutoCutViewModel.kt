@@ -15,6 +15,7 @@ import com.example.engine.ExportGalleryManager
 import com.example.engine.KeyframeEditingEngine
 import com.example.engine.RenderResult
 import com.example.engine.SpeechTranscriptionEngine
+import com.example.engine.SplitSegmentationValidationReport
 import com.example.engine.SubjectTrackingEngine
 import com.example.engine.VideoAnalysisEngine
 import com.example.engine.VideoImportResult
@@ -62,7 +63,8 @@ data class AutoCutUiState(
     val activeBannerError: AutoCutError? = null,
     val currentProjectId: Long? = null,
     val showInAppExportPlayerModal: Boolean = false,
-    val exactSettingsValidation: KeyframeEditingEngine.ExactSettingsValidationReport? = null
+    val exactSettingsValidation: KeyframeEditingEngine.ExactSettingsValidationReport? = null,
+    val splitSegmentationReport: SplitSegmentationValidationReport? = null
 )
 
 class AutoCutViewModel(application: Application) : AndroidViewModel(application) {
@@ -404,6 +406,11 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                 segments = generatedSegments,
                 expectedPresetSequence = config.fixedDirectionPresets
             )
+            val splitSegReport = speechEngine.validateSplitSegmentation(
+                transcriptWithSplits = config.suppliedSplitTranscript,
+                rawSegments = speechResult.segments,
+                totalDurationMs = metadata.durationMs
+            )
 
             completed.add(ProcessingStep.CAMERA_MOVEMENTS_CREATED)
             completed.add(ProcessingStep.KEYFRAMES_GENERATED)
@@ -441,6 +448,7 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                     isPlayingPreview = true,
                     currentProjectId = savedProjectId,
                     exactSettingsValidation = validationReport,
+                    splitSegmentationReport = splitSegReport,
                     activeBannerError = speechResult.speechDetectedWarning ?: it.activeBannerError,
                     processingState = ProcessingState(
                         isProcessing = false,
@@ -681,20 +689,29 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
         val cfg = configState.value
         val fixedDir = KeyframeEditingEngine.fixedDirectionForClipIndex(idx, cfg.fixedDirectionPresets)
         val restored = if (cfg.enforceExactKeyframeSettings) {
-            val (kf1, kf2, kf3) = KeyframeEditingEngine.buildExactKeyframeSequence(cfg.exactKeyframeTimestampsMs)
+            val (kf1, kf2, kf3) = KeyframeEditingEngine.buildPresetKeyframesForDirection(
+                direction = fixedDir,
+                startMs = seg.autoDefaultStartMs,
+                endMs = seg.autoDefaultEndMs,
+                explicitTimestampsMs = cfg.exactKeyframeTimestampsMs
+            )
             val midMs = seg.autoDefaultStartMs + ((seg.autoDefaultEndMs - seg.autoDefaultStartMs) / 2L)
-            val resolvedPeakMs = if (kf2.hasExplicitTimestamp) kf2.timestampMs else midMs
+            val resolvedPeakMs = if (kf2.hasExplicitTimestamp && kf2.timestampMs >= 0L) kf2.timestampMs else midMs
             seg.copy(
                 startMs = seg.autoDefaultStartMs,
                 endMs = seg.autoDefaultEndMs,
                 cameraDirection = fixedDir,
                 keyframeA = kf1,
                 keyframeB = kf2,
-                smartZoomPeak = kf2.zoom,
-                zoomStartTimeMs = if (kf1.hasExplicitTimestamp) kf1.timestampMs else seg.autoDefaultStartMs,
+                smartZoomPeak = fixedDir.presetZoom,
+                presetOffsetX = fixedDir.presetOffsetX,
+                presetOffsetY = fixedDir.presetOffsetY,
+                presetZoomPercent = fixedDir.presetZoomPercent,
+                presetZoom = fixedDir.presetZoom,
+                zoomStartTimeMs = if (kf1.hasExplicitTimestamp && kf1.timestampMs >= 0L) kf1.timestampMs else seg.autoDefaultStartMs,
                 zoomPeakTimeMs = resolvedPeakMs,
                 zoomHoldEndTimeMs = resolvedPeakMs,
-                zoomEndTimeMs = if (kf3.hasExplicitTimestamp) kf3.timestampMs else seg.autoDefaultEndMs,
+                zoomEndTimeMs = if (kf3.hasExplicitTimestamp && kf3.timestampMs >= 0L) kf3.timestampMs else seg.autoDefaultEndMs,
                 endKeyframe = kf3,
                 subjectRegion = seg.subjectRegion.copy(
                     startCenterX = seg.autoDefaultSubjectX,

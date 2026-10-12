@@ -634,14 +634,18 @@ private fun TimelineSegmentBlock(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = if (segment.hasExactKeyframes) "◆KF1 → ◆KF2 → ◆KF3" else "◆A → ◆B",
+                text = if (segment.hasExactKeyframes) {
+                    "X ${segment.formattedPresetX} · Y ${segment.formattedPresetY}"
+                } else {
+                    "◆A → ◆B"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 fontSize = 9.sp,
                 color = KeyframeAmber
             )
             Text(
                 text = if (segment.hasExactKeyframes) {
-                    "${segment.keyframeA.formattedZoomPercent}→${segment.keyframeB.formattedZoomPercent}→${segment.endKeyframe.formattedZoomPercent}"
+                    "Zoom ${segment.formattedPresetZoomPercent}"
                 } else {
                     "Zoom ${String.format(Locale.US, "%.2fx", segment.smartZoomPeak)}"
                 },

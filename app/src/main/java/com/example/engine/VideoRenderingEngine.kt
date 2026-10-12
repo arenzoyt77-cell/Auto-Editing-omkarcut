@@ -20,7 +20,9 @@ import android.view.Surface
 import com.example.model.AutoCutConfig
 import com.example.model.AutoCutError
 import com.example.model.CameraDirection
+import com.example.model.CameraTransform
 import com.example.model.ErrorKind
+import com.example.model.KeyframeCoordinateMapper
 import com.example.model.VideoMetadata
 import com.example.model.VideoSegment
 import kotlinx.coroutines.Dispatchers
@@ -98,11 +100,81 @@ class VideoRenderingEngine(
         val isHardwareAccelerated: Boolean
     )
 
+    data class FrameRenderTransformParams(
+        val baseScale: Float,
+        val totalScale: Float,
+        val translationX: Float,
+        val translationY: Float,
+        val zoom: Float,
+        val zoomPercent: Int,
+        val offsetX: Int,
+        val offsetY: Int
+    )
+
     companion object {
         const val INVALID_EXPORT_USER_MESSAGE =
             "Export failed — rendering produced an invalid video. Please try again."
 
         private const val H264_KEYFRAME_INTERVAL_SEC = 2
+
+        /**
+         * Computes the exact frame scale and pixel translation applied by the export renderer
+         * for a given [transform], matching the preview player's `KeyframeCoordinateMapper` math.
+         */
+        fun computeFrameRenderTransformParams(
+            sourceWidth: Int,
+            sourceHeight: Int,
+            outWidth: Int,
+            outHeight: Int,
+            transform: CameraTransform
+        ): FrameRenderTransformParams {
+            val safeSrcW = sourceWidth.coerceAtLeast(1).toFloat()
+            val safeSrcH = sourceHeight.coerceAtLeast(1).toFloat()
+            val safeOutW = outWidth.coerceAtLeast(1).toFloat()
+            val safeOutH = outHeight.coerceAtLeast(1).toFloat()
+            val baseScale = max(safeOutW / safeSrcW, safeOutH / safeSrcH)
+            val totalScale = baseScale * transform.zoom
+            val tx = KeyframeCoordinateMapper.computeViewportTranslationX(transform, safeOutW)
+            val ty = KeyframeCoordinateMapper.computeViewportTranslationY(transform, safeOutH)
+            return FrameRenderTransformParams(
+                baseScale = baseScale,
+                totalScale = totalScale,
+                translationX = tx,
+                translationY = ty,
+                zoom = transform.zoom,
+                zoomPercent = transform.zoomPercent,
+                offsetX = transform.offsetX,
+                offsetY = transform.offsetY
+            )
+        }
+
+        /**
+         * Computes per-segment frame counts using cumulative boundary frame indices on contiguous timelines
+         * so the sum of segment frames preserves the exact total frame count without rounding drift,
+         * frame loss, or frame duplication across split boundaries.
+         */
+        fun computeSegmentFrameCounts(
+            segments: List<VideoSegment>,
+            targetCfrFps: Int
+        ): List<Int> {
+            if (segments.isEmpty()) return emptyList()
+            val safeFps = targetCfrFps.coerceIn(15, 120)
+            var prevEndMs = -1000L
+            var prevEndFrame = 0
+            return segments.map { seg ->
+                val isContiguous = prevEndMs >= 0L && abs(seg.startMs - prevEndMs) <= 20L
+                val startFrame = if (isContiguous) {
+                    prevEndFrame
+                } else {
+                    ((seg.startMs * safeFps) / 1000.0).roundToInt()
+                }
+                val rawEndFrame = ((seg.endMs * safeFps) / 1000.0).roundToInt()
+                val endFrame = max(startFrame + 1, rawEndFrame)
+                prevEndMs = seg.endMs
+                prevEndFrame = endFrame
+                (endFrame - startFrame).coerceAtLeast(1)
+            }
+        }
 
         /**
          * Generates a unique export filename matching "OMKAR_AUTOCUT_YYYYMMDD_HHMMSS.mp4".
@@ -379,10 +451,7 @@ class VideoRenderingEngine(
         )
         val targetBitrateBps = computeOptimalBitrateBps(outWidth, outHeight, targetCfrFps)
 
-        val segmentFrameCounts = segments.map { seg ->
-            val segDurMs = (seg.endMs - seg.startMs).coerceAtLeast(100L)
-            max(1, ((segDurMs * targetCfrFps) / 1000.0).roundToInt())
-        }
+        val segmentFrameCounts = computeSegmentFrameCounts(segments, targetCfrFps)
         val totalExpectedFrames = segmentFrameCounts.sum().coerceAtLeast(1)
         val expectedTotalDurationMs = ((totalExpectedFrames * frameDurationUs) / 1000L).coerceAtLeast(100L)
 
@@ -692,19 +761,21 @@ class VideoRenderingEngine(
                         try {
                             canvas.drawColor(Color.BLACK)
                             if (sourceBitmap != null && !sourceBitmap.isRecycled) {
-                                val baseScale = max(
-                                    outWidth.toFloat() / sourceBitmap.width.toFloat(),
-                                    outHeight.toFloat() / sourceBitmap.height.toFloat()
+                                val renderParams = computeFrameRenderTransformParams(
+                                    sourceWidth = sourceBitmap.width,
+                                    sourceHeight = sourceBitmap.height,
+                                    outWidth = outWidth,
+                                    outHeight = outHeight,
+                                    transform = transform
                                 )
-                                val totalScale = baseScale * transform.zoom
-
-                                val pivotSrcX = sourceBitmap.width * transform.focusX
-                                val pivotSrcY = sourceBitmap.height * transform.focusY
 
                                 matrix.reset()
-                                matrix.postTranslate(-pivotSrcX, -pivotSrcY)
-                                matrix.postScale(totalScale, totalScale)
-                                matrix.postTranslate(outWidth * 0.5f, outHeight * 0.5f)
+                                matrix.postTranslate(-sourceBitmap.width * 0.5f, -sourceBitmap.height * 0.5f)
+                                matrix.postScale(renderParams.totalScale, renderParams.totalScale)
+                                matrix.postTranslate(
+                                    outWidth * 0.5f + renderParams.translationX,
+                                    outHeight * 0.5f + renderParams.translationY
+                                )
 
                                 canvas.drawBitmap(sourceBitmap, matrix, bitmapPaint)
                             }
@@ -1346,12 +1417,18 @@ class VideoRenderingEngine(
                     val segStartUs = seg.startMs * 1000L
                     val segEndUs = seg.endMs * 1000L
                     val segTargetDurationUs = segmentFrameCounts[segIdx] * frameDurationUs
+                    val prevSeg = segments.getOrNull(segIdx - 1)
+                    val nextSeg = segments.getOrNull(segIdx + 1)
+                    val isContiguousWithPrev = prevSeg != null && abs(seg.startMs - prevSeg.endMs) <= 20L
+                    val isContiguousWithNext = nextSeg != null && abs(nextSeg.startMs - seg.endMs) <= 20L
 
                     // Avoid unnecessary seek if extractor is already positioned right at segStartUs
                     val curExtractorTime = extractor.sampleTime
-                    if (curExtractorTime < 0L ||
-                        curExtractorTime > segStartUs + 30_000L ||
-                        curExtractorTime < segStartUs - 250_000L
+                    if (!isContiguousWithPrev && (
+                            curExtractorTime < 0L ||
+                                curExtractorTime > segStartUs + 30_000L ||
+                                curExtractorTime < segStartUs - 250_000L
+                            )
                     ) {
                         extractor.seekTo(segStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
                     }
@@ -1360,7 +1437,12 @@ class VideoRenderingEngine(
 
                     while (true) {
                         val sampleTimeUs = extractor.sampleTime
-                        if (sampleTimeUs < 0L || sampleTimeUs > segEndUs) break
+                        val reachedSegmentEnd = if (isContiguousWithNext) {
+                            sampleTimeUs >= segEndUs
+                        } else {
+                            sampleTimeUs > segEndUs
+                        }
+                        if (sampleTimeUs < 0L || reachedSegmentEnd) break
 
                         if (sampleTimeUs >= segStartUs) {
                             buf.clear()
@@ -1370,14 +1452,15 @@ class VideoRenderingEngine(
                             if (sampleSize > 0) {
                                 if (firstSampleInSegUs < 0L) firstSampleInSegUs = sampleTimeUs
 
-                                // asetpts=PTS-STARTPTS: reset segment start to 0L
-                                val rawLocalUs = (sampleTimeUs - firstSampleInSegUs).coerceAtLeast(0L)
+                                // Preserve sub-frame audio phase across contiguous splits while resetting non-contiguous cuts
+                                val anchorStartUs = if (isContiguousWithPrev) segStartUs else firstSampleInSegUs
+                                val rawLocalUs = (sampleTimeUs - anchorStartUs).coerceAtLeast(0L)
                                 val localPtsUs = if (lastLocalPtsUs < 0L) {
-                                    0L
+                                    rawLocalUs
                                 } else {
                                     max(lastLocalPtsUs + 1000L, rawLocalUs)
                                 }
-                                if (localPtsUs >= segTargetDurationUs) break
+                                if (!isContiguousWithNext && localPtsUs >= segTargetDurationUs + frameDurationUs) break
 
                                 val continuousAudioPtsUs = if (allContinuousPackets.isEmpty()) {
                                     0L

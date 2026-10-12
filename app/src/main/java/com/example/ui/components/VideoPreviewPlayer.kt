@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.model.CameraDirection
 import com.example.model.CameraTransform
+import com.example.model.KeyframeCoordinateMapper
 import com.example.model.VideoSegment
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.GlassBorder
@@ -274,11 +275,16 @@ fun VideoPreviewPlayer(
         ) {
             val activeZoom = if (previewAutoEditEnabled) liveTransform.zoom else 1.0f
             val panPixelsX = if (previewAutoEditEnabled) {
-                // Shift viewport opposite to focus offset so the camera focuses on focusX
-                -(liveTransform.focusX - 0.5f) * viewportSize.width * activeZoom
+                KeyframeCoordinateMapper.computeViewportTranslationX(
+                    transform = liveTransform,
+                    viewportWidthPx = viewportSize.width.toFloat()
+                )
             } else 0f
             val panPixelsY = if (previewAutoEditEnabled) {
-                -(liveTransform.focusY - 0.5f) * viewportSize.height * activeZoom
+                KeyframeCoordinateMapper.computeViewportTranslationY(
+                    transform = liveTransform,
+                    viewportHeightPx = viewportSize.height.toFloat()
+                )
             } else 0f
 
             AndroidView(

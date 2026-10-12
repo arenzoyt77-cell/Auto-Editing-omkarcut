@@ -711,7 +711,7 @@ fun StudioSettingsScreen(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            text = "RIGHT (X -87, Y +18, 117%) ↔ LEFT (X +43, Y -14, 108%) + KF1 (+5, -1, 101%) → KF2 (+179, -58, 142%) → KF3 (-160, -102, 140%)",
+                            text = "Clip 1 RIGHT (X = -87, Y = +18, Zoom = 117%) ↔ Clip 2 LEFT (X = +43, Y = -14, Zoom = 108%) · Alternating",
                             style = MaterialTheme.typography.labelSmall,
                             color = NeonEmerald
                         )

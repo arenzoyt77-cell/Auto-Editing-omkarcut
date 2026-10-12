@@ -40,12 +40,15 @@ class ExampleRobolectricTest {
     val json = SegmentJsonSerializer.toJson(timeline)
     val deserialized = SegmentJsonSerializer.fromJson(json)
 
-    assertEquals(5, deserialized.size)
-    assertEquals("हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं।", deserialized[0].spokenPhrase)
+    assertEquals(26, deserialized.size)
+    assertEquals("अरे रुको", deserialized[0].spokenPhrase)
+    assertEquals("हेडशॉट हमको नहीं आता। हम तुक्का शॉट मारते हैं।", deserialized[3].spokenPhrase)
+    assertEquals("आई लव यू बोल देना तो 2 मिलियन हो जाएंगे।", deserialized[25].spokenPhrase)
     val report = keyframeEngine.validateClipAndKeyframeSettings(deserialized)
     assertTrue(report.isValid)
-    assertEquals("X \"+5\", Y \"-1\", Zoom \"101%\"", deserialized[0].keyframes[0].formattedSummary)
-    assertEquals("X \"+179\", Y \"-58\", Zoom \"142%\"", deserialized[0].keyframes[1].formattedSummary)
-    assertEquals("X \"-160\", Y \"-102\", Zoom \"140%\"", deserialized[0].keyframes[2].formattedSummary)
+    assertEquals("X \"-87\", Y \"+18\", Zoom \"117%\"", deserialized[0].keyframes[0].formattedSummary)
+    assertEquals("X \"+43\", Y \"-14\", Zoom \"108%\"", deserialized[1].keyframes[0].formattedSummary)
+    assertEquals("X \"-87\", Y \"+18\", Zoom \"117%\"", deserialized[2].keyframes[0].formattedSummary)
+    assertEquals("X \"+43\", Y \"-14\", Zoom \"108%\"", deserialized[3].keyframes[0].formattedSummary)
   }
 }

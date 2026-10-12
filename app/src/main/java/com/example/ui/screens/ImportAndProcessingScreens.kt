@@ -8,6 +8,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +70,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.engine.ExplicitSplitMarkerParser
 import com.example.model.AutoCutConfig
 import com.example.model.CameraDirection
 import com.example.model.CameraTransform
@@ -306,38 +308,101 @@ fun ImportInspectScreen(
                 }
             }
 
-            // Active AutoCut Engine Pipeline Summary Card
+            // Active AutoCut Engine Pipeline Summary & Explicit (split) Segmentation Preview Card
+            val parsedSplitResult = remember(config.suppliedSplitTranscript) {
+                ExplicitSplitMarkerParser.parseExplicitSplitTranscript(config.suppliedSplitTranscript)
+            }
+            var showAllPreviewClips by remember { mutableStateOf(false) }
+
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
                     .background(CarbonSurface)
                     .border(1.dp, GlassBorder, RoundedCornerShape(16.dp))
-                    .padding(14.dp),
+                    .padding(14.dp)
+                    .testTag("pre_render_segmentation_preview_card"),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(
-                    text = "AUTOCUT PIPELINE CONFIGURATION (FINAL PRIORITY RULE)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = ElectricCyan
-                )
-                val splitGroupsCount = config.suppliedSplitTranscript
-                    .split(Regex("""\(\s*split\s*\)""", RegexOption.IGNORE_CASE))
-                    .map { it.trim() }
-                    .count { it.isNotEmpty() }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "SEGMENTATION PREVIEW (EXPLICIT SPLIT MARKERS)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ElectricCyan,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "${parsedSplitResult.segments.size} CLIPS • ${if (parsedSplitResult.hasExplicitSplitMarkers) "EXPLICIT (SPLIT)" else "SINGLE CLIP"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NeonEmerald,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
                 val timingStatusText = if (config.exactKeyframeTimestampsMs.size >= 3) {
                     "Explicit Reference Timing: ${config.exactKeyframeTimestampsMs.take(3).joinToString("ms → ")}ms"
                 } else {
                     "Reference Timing Limitation: Exact keyframe timestamps not supplied in project data (no timestamps invented; configure in Settings if available)"
                 }
                 Text(
-                    text = "• Step 1 — Sentence-Wise (split) Grouping: ${if (splitGroupsCount > 0) "$splitGroupsCount marked spoken groups preserved intact" else "Audio Speech Boundary Detection"}\n" +
-                        "• Step 2 — Fixed Presets by Clip Index: Clip 1 RIGHT (X -87, Y +18, Zoom 117%) ↔ Clip 2 LEFT (X +43, Y -14, Zoom 108%)\n" +
-                        "• Step 3 — Exact 3 Keyframes: KF1 (X +5, Y -1, 101%) → KF2 (X +179, Y -58, 142%) → KF3 (X -160, Y -102, 140%)\n" +
-                        "• Step 4 — $timingStatusText",
+                    text = "• Rule 1 — Explicit (split) Boundaries Only: ${parsedSplitResult.segments.size} dialogue clips (${parsedSplitResult.rawMarkerCount} markers; never auto-splits at punctuation/pauses)\n" +
+                        "• Rule 2 — Fixed Presets by Clip Index: Clip 1 RIGHT (X -87, Y +18, Zoom 117%) ↔ Clip 2 LEFT (X +43, Y -14, Zoom 108%)\n" +
+                        "• Rule 3 — Exact 3 Keyframes: KF1 (X +5, Y -1, 101%) → KF2 (X +179, Y -58, 142%) → KF3 (X -160, Y -102, 140%)\n" +
+                        "• Rule 4 — $timingStatusText",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
+
+                if (parsedSplitResult.segments.isNotEmpty()) {
+                    val displayedClips = if (showAllPreviewClips) {
+                        parsedSplitResult.segments
+                    } else {
+                        parsedSplitResult.segments.take(5)
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(ElevatedCardBg)
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        displayedClips.forEach { clip ->
+                            val presetDir = if (clip.index % 2 == 0) "RIGHT (X -87, Y +18, 117%)" else "LEFT (X +43, Y -14, 108%)"
+                            Text(
+                                text = "Clip ${clip.clipNumber}: ${clip.text}  [$presetDir]",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextPrimary,
+                                fontSize = 10.sp
+                            )
+                        }
+                        if (!showAllPreviewClips && parsedSplitResult.segments.size > 5) {
+                            val lastClip = parsedSplitResult.segments.last()
+                            val lastPreset = if (lastClip.index % 2 == 0) "RIGHT" else "LEFT"
+                            Text(
+                                text = "... +${parsedSplitResult.segments.size - 6} more clips ... → Clip ${lastClip.clipNumber}: ${lastClip.text} [$lastPreset]",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = KeyframeAmber,
+                                fontSize = 10.sp
+                            )
+                        }
+                        if (parsedSplitResult.segments.size > 5) {
+                            Text(
+                                text = if (showAllPreviewClips) "▲ COLLAPSE CLIP LIST" else "▼ VIEW ALL ${parsedSplitResult.segments.size} PARSED CLIPS",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ElectricCyan,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clickable { showAllPreviewClips = !showAllPreviewClips }
+                                    .padding(top = 4.dp)
+                                    .testTag("toggle_all_parsed_clips_button")
+                            )
+                        }
+                    }
+                }
             }
 
             // Primary CTA Button: AUTO CUT (Section 3)

@@ -16,6 +16,7 @@ import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 enum class SpeakerIdentity(val badgeLabel: String, val displayTitle: String) {
@@ -405,7 +406,8 @@ class SpeechTranscriptionEngine {
                     totalDurationMs = durationMs,
                     explicitSplitTimestampsMs = config.suppliedSplitTimestampsMs,
                     vocalRmsBins = null,
-                    windowMs = 20L
+                    windowMs = 20L,
+                    fps = metadata.fps
                 ).map { seg ->
                     seg.copy(
                         confidence = 0.65f,
@@ -478,7 +480,9 @@ class SpeechTranscriptionEngine {
                 totalDurationMs = durationMs,
                 explicitSplitTimestampsMs = config.suppliedSplitTimestampsMs,
                 vocalRmsBins = if (decodedSuccess && maxEnergy >= 0.002f) vocalRmsBins else null,
-                windowMs = windowMs
+                windowMs = windowMs,
+                fps = metadata.fps,
+                pitchHzBins = if (decodedSuccess) pitchHzBins else null
             )
             val lowConfClips = suppliedSegments.mapIndexedNotNull { idx, seg ->
                 if (seg.needsCorrection) idx + 1 else null
@@ -501,13 +505,6 @@ class SpeechTranscriptionEngine {
                     title = "Low Alignment Confidence on ${lowConfClips.size} Clip(s)",
                     message = "Clips ${lowConfClips.joinToString(", ") { "#$it" }} had low vocal energy and were flagged for timing review rather than inventing inaccurate splits.",
                     recoveryHint = "Inspect flagged clips in the Segmentation Preview panel and fine-tune split boundaries if needed.",
-                    isWarningOnly = true
-                )
-                config.suppliedSplitTimestampsMs.isEmpty() || config.exactKeyframeTimestampsMs.size < 3 -> AutoCutError(
-                    kind = ErrorKind.SPEECH_NOT_DETECTED,
-                    title = "Explicit (split) Alignment & Exact Keyframes Ready",
-                    message = "Generated ${suppliedSegments.size} dialogue clips strictly from explicit '(split)' markers (no punctuation or pause splitting), with Keyframes 1–3 preserved in order.",
-                    recoveryHint = "Review the Segmentation Preview below before rendering.",
                     isWarningOnly = true
                 )
                 else -> null
@@ -577,16 +574,89 @@ class SpeechTranscriptionEngine {
     }
 
     /**
+     * Validates that the generated speech segments match the explicit "(split)" marker boundaries,
+     * preserve original order, remove "(split)" from captions, and maintain contiguous timeline boundaries.
+     */
+    fun validateSplitSegmentation(
+        transcriptWithSplits: String,
+        rawSegments: List<RawSpeechSegment>,
+        totalDurationMs: Long = 0L
+    ): SplitSegmentationValidationReport {
+        val lowConfClips = rawSegments.mapIndexedNotNull { idx, seg ->
+            if (seg.needsCorrection) idx + 1 else null
+        }
+        val baseReport = ExplicitSplitMarkerParser.validateExplicitSplitClips(
+            transcriptWithSplits = transcriptWithSplits,
+            clipTexts = rawSegments.map { it.spokenPhrase },
+            lowConfidenceClipNumbers = lowConfClips
+        )
+        if (rawSegments.isEmpty() || totalDurationMs <= 0L) {
+            return baseReport
+        }
+
+        val timelineDetails = baseReport.details.toMutableList()
+        var timelineValid = true
+        if (rawSegments.first().startMs != 0L) {
+            timelineValid = false
+            timelineDetails.add("First clip startMs (${rawSegments.first().startMs}) does not begin at 0ms.")
+        }
+        for (i in 0 until rawSegments.size - 1) {
+            val curr = rawSegments[i]
+            val next = rawSegments[i + 1]
+            if (curr.endMs <= curr.startMs) {
+                timelineValid = false
+                timelineDetails.add("Clip ${i + 1} has non-positive duration (${curr.startMs}..${curr.endMs}).")
+            }
+            if (curr.endMs != next.startMs) {
+                timelineValid = false
+                timelineDetails.add("Boundary mismatch between Clip ${i + 1} endMs (${curr.endMs}) and Clip ${i + 2} startMs (${next.startMs}).")
+            }
+        }
+        val lastSeg = rawSegments.last()
+        if (lastSeg.endMs <= lastSeg.startMs) {
+            timelineValid = false
+            timelineDetails.add("Final clip ${rawSegments.size} has non-positive duration.")
+        }
+        val expectedDuration = max(totalDurationMs, lastSeg.endMs)
+        if (lastSeg.endMs != expectedDuration) {
+            timelineValid = false
+            timelineDetails.add("Final clip endMs (${lastSeg.endMs}) does not match total duration ($expectedDuration).")
+        }
+        val totalSpanMs = rawSegments.sumOf { (it.endMs - it.startMs).coerceAtLeast(0L) }
+        if (totalSpanMs != lastSeg.endMs - rawSegments.first().startMs) {
+            timelineValid = false
+            timelineDetails.add("Sum of clip durations ($totalSpanMs) does not equal total timeline span (${lastSeg.endMs}).")
+        }
+        if (rawSegments.size >= 4) {
+            val distinctDurations = rawSegments.map { it.endMs - it.startMs }.distinct()
+            val distinctLengths = rawSegments.map { it.spokenPhrase.length }.distinct()
+            if (distinctLengths.size >= 3 && distinctDurations.size <= 1) {
+                timelineValid = false
+                timelineDetails.add("Clips use equal-duration splits instead of speech-aligned timestamps.")
+            }
+        }
+
+        return baseReport.copy(
+            isValid = baseReport.isValid && timelineValid,
+            details = timelineDetails
+        )
+    }
+
+    /**
      * Builds chronological segments strictly following supplied "(split)" boundaries.
      * Uses `ExplicitSplitMarkerParser` as the single source of truth for clip count and text,
-     * and aligns each complete dialogue segment to the source audio without cutting words off.
+     * aligns each complete dialogue group to real inter-utterance speech pauses in the source audio
+     * without splitting inside multi-sentence groups or cutting words off, and quantizes split
+     * boundaries to exact video frame boundaries (`fps`).
      */
     fun createSegmentsFromSuppliedSplits(
         transcriptWithSplits: String,
         totalDurationMs: Long,
         explicitSplitTimestampsMs: List<Long> = emptyList(),
         vocalRmsBins: FloatArray? = null,
-        windowMs: Long = 20L
+        windowMs: Long = 20L,
+        fps: Float = 30f,
+        pitchHzBins: FloatArray? = null
     ): List<RawSpeechSegment> {
         val parseResult = ExplicitSplitMarkerParser.parseExplicitSplitTranscript(transcriptWithSplits)
         val parsedSegments = parseResult.segments
@@ -596,6 +666,8 @@ class SpeechTranscriptionEngine {
 
         val count = parsedSegments.size
         val safeDurationMs = totalDurationMs.coerceAtLeast(max(500L, count * 90L))
+        val safeFps = fps.coerceIn(15f, 120f).toDouble()
+        val frameStepMs = 1000.0 / safeFps
 
         if (count == 1) {
             val single = parsedSegments.first()
@@ -616,9 +688,20 @@ class SpeechTranscriptionEngine {
             )
         }
 
-        val minClipStepMs = min(140L, max(25L, safeDurationMs / (count * 3L)))
+        val minClipStepMs = min(140L, max(33L, safeDurationMs / (count * 3L)))
         val hasUsableAudioEnvelope = vocalRmsBins != null && vocalRmsBins.size >= 10 && windowMs > 0L &&
             (vocalRmsBins.maxOrNull() ?: 0f) >= 0.002f
+
+        fun snapToFrameBoundaryMs(rawMs: Long, minMs: Long, maxMs: Long): Long {
+            if (maxMs <= minMs) return minMs
+            val frameIndex = (rawMs.toDouble() / frameStepMs).roundToLong()
+            val frameAlignedMs = (frameIndex * frameStepMs).roundToLong()
+            return if (frameAlignedMs in minMs..maxMs) {
+                frameAlignedMs
+            } else {
+                rawMs.coerceIn(minMs, maxMs)
+            }
+        }
 
         val boundariesMs: List<Long> = when {
             explicitSplitTimestampsMs.size == count + 1 -> {
@@ -636,12 +719,36 @@ class SpeechTranscriptionEngine {
                 val weights = parsedSegments.map { it.spokenDurationWeight.coerceAtLeast(6) }
                 val totalWeight = weights.sum().coerceAtLeast(1)
 
-                // Optional cumulative vocal energy curve for word/pause-aware alignment
-                val cumulativeAudioEnergy = if (hasUsableAudioEnvelope && vocalRmsBins != null) {
-                    val cum = DoubleArray(vocalRmsBins.size + 1)
-                    val noiseFloor = (vocalRmsBins.minOrNull() ?: 0f).coerceAtLeast(0f)
-                    for (w in vocalRmsBins.indices) {
-                        val activeE = (vocalRmsBins[w] - noiseFloor * 0.5f).coerceAtLeast(0.001f)
+                // Smooth audio envelope across a 100ms (5-window) speech kernel so plosive stops or
+                // tiny intra-word gaps do not look like inter-line split boundaries.
+                val smoothedAudio = if (hasUsableAudioEnvelope && vocalRmsBins != null) {
+                    val maxBin = (vocalRmsBins.maxOrNull() ?: 1f).coerceAtLeast(1e-4f)
+                    FloatArray(vocalRmsBins.size) { w ->
+                        var sum = 0f
+                        var wSum = 0f
+                        for (k in -2..2) {
+                            val idx = (w + k).coerceIn(0, vocalRmsBins.size - 1)
+                            val wt = when (abs(k)) {
+                                0 -> 0.36f
+                                1 -> 0.22f
+                                else -> 0.10f
+                            }
+                            sum += (vocalRmsBins[idx] / maxBin) * wt
+                            wSum += wt
+                        }
+                        (sum / wSum).coerceIn(0f, 1f)
+                    }
+                } else {
+                    null
+                }
+
+                // Cumulative active vocal energy curve for spoken-turn alignment
+                val cumulativeAudioEnergy = if (smoothedAudio != null) {
+                    val cum = DoubleArray(smoothedAudio.size + 1)
+                    val sorted = smoothedAudio.sortedArray()
+                    val noiseFloor = sorted[(smoothedAudio.size * 0.18).toInt().coerceIn(0, smoothedAudio.size - 1)]
+                    for (w in smoothedAudio.indices) {
+                        val activeE = (smoothedAudio[w] - noiseFloor * 0.65f).coerceAtLeast(0.015f)
                         cum[w + 1] = cum[w] + activeE.toDouble()
                     }
                     cum
@@ -662,39 +769,57 @@ class SpeechTranscriptionEngine {
                     val minAllowedMs = computed.last() + minClipStepMs
                     val maxAllowedMs = (safeDurationMs - remainingClips * minClipStepMs).coerceAtLeast(minAllowedMs)
 
-                    val snappedMs = if (hasUsableAudioEnvelope && vocalRmsBins != null && cumulativeAudioEnergy != null) {
+                    val rawSelectedMs = if (smoothedAudio != null && cumulativeAudioEnergy != null) {
                         val totalE = cumulativeAudioEnergy.last().coerceAtLeast(1e-6)
                         val targetEnergy = totalE * weightFraction
-                        var energyWin = vocalRmsBins.size / 2
-                        for (w in vocalRmsBins.indices) {
+                        var energyWin = smoothedAudio.size / 2
+                        for (w in smoothedAudio.indices) {
                             if (cumulativeAudioEnergy[w + 1] >= targetEnergy) {
                                 energyWin = w
                                 break
                             }
                         }
                         val energyTargetMs = (energyWin * windowMs).coerceIn(0L, safeDurationMs)
-                        // Blend spoken word/clause weight (72%) with cumulative vocal energy progression (28%)
-                        val blendedTargetMs = ((cadenceTargetMs * 0.72) + (energyTargetMs * 0.28)).toLong()
+                        // Blend linguistic/syllable group weight (68%) with cumulative vocal energy progression (32%)
+                        val blendedTargetMs = ((cadenceTargetMs * 0.68) + (energyTargetMs * 0.32)).toLong()
                             .coerceIn(minAllowedMs, maxAllowedMs)
 
-                        val targetWin = (blendedTargetMs / windowMs).toInt().coerceIn(1, vocalRmsBins.size - 2)
-                        val maxSearchMs = min(460L, max(60L, (maxAllowedMs - minAllowedMs) / 2L))
+                        val targetWin = (blendedTargetMs / windowMs).toInt().coerceIn(1, smoothedAudio.size - 2)
+                        val maxSearchMs = min(560L, max(80L, (maxAllowedMs - minAllowedMs) / 2L))
                         val searchRadiusWins = (maxSearchMs / windowMs).toInt().coerceAtLeast(2)
 
                         val minWin = max((minAllowedMs / windowMs).toInt(), targetWin - searchRadiusWins)
-                            .coerceIn(1, vocalRmsBins.size - 2)
+                            .coerceIn(1, smoothedAudio.size - 2)
                         val maxWin = min((maxAllowedMs / windowMs).toInt(), targetWin + searchRadiusWins)
-                            .coerceIn(minWin, vocalRmsBins.size - 2)
+                            .coerceIn(minWin, smoothedAudio.size - 2)
 
                         var bestWin = targetWin.coerceIn(minWin, maxWin)
                         var lowestScore = Float.MAX_VALUE
-                        val maxBinE = (vocalRmsBins.maxOrNull() ?: 1f).coerceAtLeast(1e-4f)
 
                         for (w in minWin..maxWin) {
-                            // 3-window local energy valley so we snap cleanly to inter-utterance pauses without cutting words
-                            val localEnergy = ((vocalRmsBins[w - 1] + vocalRmsBins[w] * 2f + vocalRmsBins[w + 1]) * 0.25f) / maxBinE
-                            val distPenalty = (abs(w - targetWin).toFloat() / searchRadiusWins.coerceAtLeast(1).toFloat()) * 0.08f
-                            val score = localEnergy + distPenalty
+                            // Evaluate sustained inter-line pause valley (5-window = 100ms pause dip)
+                            // flanked by active speech before and after so we split between spoken lines,
+                            // never inside words or on tiny intra-sentence consonant stops.
+                            val valleyCenter = (
+                                smoothedAudio[(w - 1).coerceAtLeast(0)] +
+                                    smoothedAudio[w] * 2f +
+                                    smoothedAudio[(w + 1).coerceAtMost(smoothedAudio.size - 1)]
+                                ) * 0.25f
+                            val flankLeft = smoothedAudio[(w - 4).coerceAtLeast(0)]
+                            val flankRight = smoothedAudio[(w + 4).coerceAtMost(smoothedAudio.size - 1)]
+                            val pauseContrastBonus = ((flankLeft + flankRight) * 0.5f - valleyCenter).coerceIn(0f, 0.35f) * 0.30f
+
+                            // Speaker turn / pitch transition bonus if pitch features are present
+                            val pitchTurnBonus = if (pitchHzBins != null && w >= 4 && w < pitchHzBins.size - 4) {
+                                val pLeft = pitchHzBins[w - 3]
+                                val pRight = pitchHzBins[w + 3]
+                                if (pLeft in 75f..340f && pRight in 75f..340f) {
+                                    (abs(pLeft - pRight) / 120f).coerceIn(0f, 0.18f)
+                                } else 0f
+                            } else 0f
+
+                            val distPenalty = (abs(w - targetWin).toFloat() / searchRadiusWins.coerceAtLeast(1).toFloat()) * 0.10f
+                            val score = valleyCenter - pauseContrastBonus - pitchTurnBonus + distPenalty
                             if (score < lowestScore) {
                                 lowestScore = score
                                 bestWin = w
@@ -705,7 +830,8 @@ class SpeechTranscriptionEngine {
                         cadenceTargetMs.coerceIn(minAllowedMs, maxAllowedMs)
                     }
 
-                    computed.add(snappedMs)
+                    val frameSnappedMs = snapToFrameBoundaryMs(rawSelectedMs, minAllowedMs, maxAllowedMs)
+                    computed.add(frameSnappedMs)
                 }
                 computed.add(safeDurationMs)
                 computed

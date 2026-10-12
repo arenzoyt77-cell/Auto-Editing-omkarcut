@@ -17,10 +17,32 @@ enum class AppScreen {
     SETTINGS
 }
 
-enum class CameraDirection(val displayName: String, val badgeText: String, val arrowSymbol: String) {
-    RIGHT("Track Right", "→ RIGHT", "→"),
-    LEFT("Track Left", "← LEFT", "←"),
-    CENTER("Center Hold", "◎ CENTER", "◎");
+enum class CameraDirection(
+    val displayName: String,
+    val badgeText: String,
+    val arrowSymbol: String,
+    val presetOffsetX: Int,
+    val presetOffsetY: Int,
+    val presetZoomPercent: Int
+) {
+    RIGHT("Track Right", "→ RIGHT", "→", -87, 18, 117),
+    LEFT("Track Left", "← LEFT", "←", 43, -14, 108),
+    CENTER("Center Hold", "◎ CENTER", "◎", 0, 0, 100);
+
+    val presetZoom: Float
+        get() = presetZoomPercent / 100f
+
+    val formattedPresetX: String
+        get() = if (presetOffsetX >= 0) "+$presetOffsetX" else "$presetOffsetX"
+
+    val formattedPresetY: String
+        get() = if (presetOffsetY >= 0) "+$presetOffsetY" else "$presetOffsetY"
+
+    val formattedPresetZoom: String
+        get() = "${presetZoomPercent}%"
+
+    val formattedPresetSummary: String
+        get() = "X = $formattedPresetX, Y = $formattedPresetY, Zoom = $formattedPresetZoom"
 
     fun next(): CameraDirection = when (this) {
         RIGHT -> LEFT
@@ -121,14 +143,30 @@ object KeyframeCoordinateMapper {
     const val REFERENCE_CANVAS_WIDTH = 1080f
     const val REFERENCE_CANVAS_HEIGHT = 1920f
 
+    fun zoomPercentToScale(zoomPercent: Int): Float {
+        return (zoomPercent / 100f).coerceAtLeast(0.10f)
+    }
+
+    fun scaleToZoomPercent(zoom: Float): Int {
+        return (zoom * 100f).roundToInt()
+    }
+
     fun offsetXToFocusX(offsetX: Int, zoom: Float): Float {
         return offsetXToFocusX(offsetX.toFloat(), zoom)
     }
 
+    /**
+     * Converts a horizontal position offset `offsetX` (in 1080x1920 reference canvas pixels,
+     * e.g. -87 for RIGHT or +43 for LEFT) at scale `zoom` into a normalized crop center `focusX` in [0, 1].
+     *
+     * Because translating the scaled video layer by `offsetX` shifts the visible center opposite to the
+     * layer translation (`translationX = -(focusX - 0.5f) * width * zoom`), `focusX` is:
+     * `0.5f - (offsetX / (REFERENCE_CANVAS_WIDTH * zoom))`.
+     */
     fun offsetXToFocusX(offsetX: Float, zoom: Float): Float {
         val safeZoom = zoom.coerceAtLeast(1.0001f)
         val halfView = (0.5f / safeZoom).coerceIn(0.10f, 0.50f)
-        val rawFocusX = 0.5f + (offsetX / (REFERENCE_CANVAS_WIDTH * safeZoom))
+        val rawFocusX = 0.5f - (offsetX / (REFERENCE_CANVAS_WIDTH * safeZoom))
         return rawFocusX.coerceIn(halfView, 1.0f - halfView)
     }
 
@@ -136,21 +174,51 @@ object KeyframeCoordinateMapper {
         return offsetYToFocusY(offsetY.toFloat(), zoom)
     }
 
+    /**
+     * Converts a vertical position offset `offsetY` (in 1080x1920 reference canvas pixels,
+     * e.g. +18 for RIGHT or -14 for LEFT) at scale `zoom` into a normalized crop center `focusY` in [0, 1].
+     */
     fun offsetYToFocusY(offsetY: Float, zoom: Float): Float {
         val safeZoom = zoom.coerceAtLeast(1.0001f)
         val halfView = (0.5f / safeZoom).coerceIn(0.10f, 0.50f)
-        val rawFocusY = 0.5f + (offsetY / (REFERENCE_CANVAS_HEIGHT * safeZoom))
+        val rawFocusY = 0.5f - (offsetY / (REFERENCE_CANVAS_HEIGHT * safeZoom))
         return rawFocusY.coerceIn(halfView, 1.0f - halfView)
     }
 
     fun focusXToOffsetX(focusX: Float, zoom: Float): Int {
+        return focusXToOffsetXFloat(focusX, zoom).roundToInt()
+    }
+
+    fun focusXToOffsetXFloat(focusX: Float, zoom: Float): Float {
         val safeZoom = zoom.coerceAtLeast(1.0001f)
-        return ((focusX - 0.5f) * REFERENCE_CANVAS_WIDTH * safeZoom).roundToInt()
+        return -(focusX - 0.5f) * REFERENCE_CANVAS_WIDTH * safeZoom
     }
 
     fun focusYToOffsetY(focusY: Float, zoom: Float): Int {
+        return focusYToOffsetYFloat(focusY, zoom).roundToInt()
+    }
+
+    fun focusYToOffsetYFloat(focusY: Float, zoom: Float): Float {
         val safeZoom = zoom.coerceAtLeast(1.0001f)
-        return ((focusY - 0.5f) * REFERENCE_CANVAS_HEIGHT * safeZoom).roundToInt()
+        return -(focusY - 0.5f) * REFERENCE_CANVAS_HEIGHT * safeZoom
+    }
+
+    /**
+     * Computes the exact horizontal pixel translation (`translationX`) for a viewport or export canvas
+     * of width `viewportWidthPx`. On a 1080px canvas, returns `-87f` for RIGHT and `+43f` for LEFT.
+     */
+    fun computeViewportTranslationX(transform: CameraTransform, viewportWidthPx: Float): Float {
+        if (viewportWidthPx <= 0f) return 0f
+        return (transform.offsetXFloat / REFERENCE_CANVAS_WIDTH) * viewportWidthPx
+    }
+
+    /**
+     * Computes the exact vertical pixel translation (`translationY`) for a viewport or export canvas
+     * of height `viewportHeightPx`. On a 1920px canvas, returns `+18f` for RIGHT and `-14f` for LEFT.
+     */
+    fun computeViewportTranslationY(transform: CameraTransform, viewportHeightPx: Float): Float {
+        if (viewportHeightPx <= 0f) return 0f
+        return (transform.offsetYFloat / REFERENCE_CANVAS_HEIGHT) * viewportHeightPx
     }
 }
 
@@ -207,7 +275,9 @@ data class CameraTransform(
     val spokenPhrase: String,
     val offsetX: Int = KeyframeCoordinateMapper.focusXToOffsetX(focusX, zoom),
     val offsetY: Int = KeyframeCoordinateMapper.focusYToOffsetY(focusY, zoom),
-    val zoomPercent: Int = (zoom * 100f).roundToInt()
+    val zoomPercent: Int = (zoom * 100f).roundToInt(),
+    val offsetXFloat: Float = KeyframeCoordinateMapper.focusXToOffsetXFloat(focusX, zoom),
+    val offsetYFloat: Float = KeyframeCoordinateMapper.focusYToOffsetYFloat(focusY, zoom)
 ) {
     val formattedX: String
         get() = if (offsetX >= 0) "+$offsetX" else "$offsetX"
@@ -242,8 +312,16 @@ data class VideoSegment(
         focusX = keyframeA.focusX,
         focusY = keyframeA.focusY,
         label = "KEYFRAME END",
-        timestampMs = endMs
+        timestampMs = endMs,
+        offsetX = keyframeA.offsetX,
+        offsetY = keyframeA.offsetY,
+        zoomPercent = keyframeA.zoomPercent,
+        isExactPreset = keyframeA.isExactPreset
     ),
+    val presetOffsetX: Int = cameraDirection.presetOffsetX,
+    val presetOffsetY: Int = cameraDirection.presetOffsetY,
+    val presetZoomPercent: Int = cameraDirection.presetZoomPercent,
+    val presetZoom: Float = cameraDirection.presetZoom,
     val isModifiedManually: Boolean = false,
     val autoDefaultDirection: CameraDirection = cameraDirection,
     val autoDefaultZoomPeak: Float = smartZoomPeak,
@@ -260,8 +338,26 @@ data class VideoSegment(
     val hasExactKeyframes: Boolean
         get() = keyframeA.isExactPreset && keyframeB.isExactPreset && endKeyframe.isExactPreset
 
+    val hasExactPresetTransform: Boolean
+        get() = hasExactKeyframes &&
+            presetOffsetX == cameraDirection.presetOffsetX &&
+            presetOffsetY == cameraDirection.presetOffsetY &&
+            presetZoomPercent == cameraDirection.presetZoomPercent
+
     val hasExplicitKeyframeTiming: Boolean
         get() = keyframeA.hasExplicitTimestamp && keyframeB.hasExplicitTimestamp && endKeyframe.hasExplicitTimestamp
+
+    val formattedPresetX: String
+        get() = if (presetOffsetX >= 0) "+$presetOffsetX" else "$presetOffsetX"
+
+    val formattedPresetY: String
+        get() = if (presetOffsetY >= 0) "+$presetOffsetY" else "$presetOffsetY"
+
+    val formattedPresetZoomPercent: String
+        get() = "${presetZoomPercent}%"
+
+    val formattedPresetSummary: String
+        get() = "X = $formattedPresetX, Y = $formattedPresetY, Zoom = $formattedPresetZoomPercent"
 
     val durationMs: Long
         get() = (endMs - startMs).coerceAtLeast(80L)
@@ -277,7 +373,11 @@ data class VideoSegment(
 
     val formattedZoomRange: String
         get() = if (hasExactKeyframes) {
-            "${keyframeA.formattedZoomPercent} → ${keyframeB.formattedZoomPercent} → ${endKeyframe.formattedZoomPercent}"
+            if (keyframeA.zoomPercent == keyframeB.zoomPercent && keyframeB.zoomPercent == endKeyframe.zoomPercent) {
+                "X $formattedPresetX • Y $formattedPresetY • $formattedPresetZoomPercent"
+            } else {
+                "${keyframeA.formattedZoomPercent} → ${keyframeB.formattedZoomPercent} → ${endKeyframe.formattedZoomPercent}"
+            }
         } else {
             String.format(Locale.US, "%.2fx → %.2fx", keyframeA.zoom, keyframeB.zoom)
         }
@@ -432,6 +532,10 @@ object SegmentJsonSerializer {
             obj.put("speechConfidence", seg.speechConfidence.toDouble())
             obj.put("peakDb", seg.peakDb.toDouble())
             obj.put("cameraDirection", seg.cameraDirection.name)
+            obj.put("presetOffsetX", seg.presetOffsetX)
+            obj.put("presetOffsetY", seg.presetOffsetY)
+            obj.put("presetZoomPercent", seg.presetZoomPercent)
+            obj.put("presetZoom", seg.presetZoom.toDouble())
             obj.put("smartZoomPeak", seg.smartZoomPeak.toDouble())
             obj.put("zoomStartTimeMs", seg.zoomStartTimeMs)
             obj.put("zoomPeakTimeMs", seg.zoomPeakTimeMs)
@@ -621,6 +725,10 @@ object SegmentJsonSerializer {
                         zoomHoldEndTimeMs = obj.optLong("zoomHoldEndTimeMs", defaultHoldEndTimeMs),
                         zoomEndTimeMs = obj.optLong("zoomEndTimeMs", endMs),
                         endKeyframe = kfEnd,
+                        presetOffsetX = obj.optInt("presetOffsetX", dir.presetOffsetX),
+                        presetOffsetY = obj.optInt("presetOffsetY", dir.presetOffsetY),
+                        presetZoomPercent = obj.optInt("presetZoomPercent", dir.presetZoomPercent),
+                        presetZoom = obj.optDouble("presetZoom", dir.presetZoom.toDouble()).toFloat(),
                         isModifiedManually = obj.optBoolean("isModifiedManually", false),
                         autoDefaultDirection = if (i % 2 == 0) CameraDirection.RIGHT else CameraDirection.LEFT,
                         autoDefaultZoomPeak = zoomPeak,
