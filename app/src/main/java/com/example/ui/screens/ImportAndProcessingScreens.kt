@@ -350,7 +350,7 @@ fun ImportInspectScreen(
                 Text(
                     text = "• Rule 1 — Explicit (split) Boundaries Only: ${parsedSplitResult.segments.size} dialogue clips (${parsedSplitResult.rawMarkerCount} markers; never auto-splits at punctuation/pauses)\n" +
                         "• Rule 2 — Fixed Presets by Clip Index: Clip 1 RIGHT (X -87, Y +18, Zoom 117%) ↔ Clip 2 LEFT (X +43, Y -14, Zoom 108%)\n" +
-                        "• Rule 3 — Exact 3 Keyframes: KF1 (X +5, Y -1, 101%) → KF2 (X +179, Y -58, 142%) → KF3 (X -160, Y -102, 140%)\n" +
+                        "• Rule 3 — Exact Preset Keyframes: RIGHT (X -87, Y +18, Zoom 117%) ↔ LEFT (X +43, Y -14, Zoom 108%) with smooth interpolation\n" +
                         "• Rule 4 — $timingStatusText",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary

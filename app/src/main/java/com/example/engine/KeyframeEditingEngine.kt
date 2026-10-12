@@ -1134,11 +1134,11 @@ class KeyframeEditingEngine {
     }
 
     /**
-     * Evaluates the exact 3-keyframe sequence in intended order:
-     * - Keyframe 1: X "+5", Y "-1", Zoom "101%"
-     * - Keyframe 2: X "+179", Y "-58", Zoom "142%"
-     * - Keyframe 3: X "-160", Y "-102", Zoom "140%"
-     * while preserving the clip's fixed chronological LEFT/RIGHT preset (`activeSeg.cameraDirection`).
+     * Evaluates the exact keyframe sequence in intended chronological order:
+     * - RIGHT: X = -87, Y = +18, Zoom = 117%
+     * - LEFT:  X = +43, Y = -14, Zoom = 108%
+     * while preserving the clip's fixed chronological preset (`activeSeg.cameraDirection`)
+     * and smooth continuous keyframe interpolation.
      */
     private fun evaluateExactKeyframeSequenceAtUs(
         activeSeg: VideoSegment,

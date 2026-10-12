@@ -681,4 +681,82 @@ class ExampleUnitTest {
         assertTrue(validationReport.clipsPreserveFixedLeftRightPresets)
         assertTrue(validationReport.keyframesPreserveExactValuesAndOrder)
     }
+
+    @Test
+    fun smoothKeyframeInterpolation_maintainsContinuousMotion_withoutAbruptJumpsOrInventedTimestamps() {
+        val keyframeEngine = KeyframeEditingEngine()
+        val speechEngine = SpeechTranscriptionEngine()
+
+        // 1. Verify explicit keyframe timestamps when provided are preserved and evaluated smoothly
+        val explicitTimestamps = listOf(1000L, 2500L, 4000L)
+        val (kf1, kf2, kf3) = KeyframeEditingEngine.buildPresetKeyframesForDirection(
+            direction = CameraDirection.RIGHT,
+            explicitTimestampsMs = explicitTimestamps
+        )
+        assertTrue(kf1.hasExplicitTimestamp)
+        assertEquals(1000L, kf1.timestampMs)
+        assertTrue(kf2.hasExplicitTimestamp)
+        assertEquals(2500L, kf2.timestampMs)
+        assertTrue(kf3.hasExplicitTimestamp)
+        assertEquals(4000L, kf3.timestampMs)
+
+        // 2. Verify when reference timestamps are absent, no fake/invented timestamps are assigned
+        val (noTimeKf1, noTimeKf2, noTimeKf3) = KeyframeEditingEngine.buildPresetKeyframesForDirection(
+            direction = CameraDirection.LEFT
+        )
+        assertFalse("Must not invent timestamps when none supplied", noTimeKf1.hasExplicitTimestamp)
+        assertEquals(com.example.model.CameraKeyframe.UNSET_TIMESTAMP_MS, noTimeKf1.timestampMs)
+        assertFalse("Must not invent timestamps when none supplied", noTimeKf2.hasExplicitTimestamp)
+        assertEquals(com.example.model.CameraKeyframe.UNSET_TIMESTAMP_MS, noTimeKf2.timestampMs)
+        assertFalse("Must not invent timestamps when none supplied", noTimeKf3.hasExplicitTimestamp)
+        assertEquals(com.example.model.CameraKeyframe.UNSET_TIMESTAMP_MS, noTimeKf3.timestampMs)
+
+        // 3. Test smooth interpolation across time steps within a clip (avoid abrupt jumps between frames)
+        val rawSegments = speechEngine.createSegmentsFromSuppliedSplits(
+            transcriptWithSplits = "अरे रुको (split) क्यों? क्या हुई? (split)",
+            totalDurationMs = 6000L
+        )
+        val subjects = listOf(
+            SubjectRegion(0.50f, 0.48f, 0.50f, 0.48f, 0.35f, 0.42f, 0.1f, 0.9f),
+            SubjectRegion(0.50f, 0.48f, 0.50f, 0.48f, 0.35f, 0.42f, 0.1f, 0.9f)
+        )
+        val timeline = keyframeEngine.generateSegmentedTimeline(rawSegments, subjects, AutoCutConfig())
+        val clip1 = timeline[0]
+
+        // Sample every 50ms across clip 1 (from start to end)
+        var prevZoom = -1f
+        var prevX = Float.NaN
+        var prevY = Float.NaN
+        for (sampleMs in clip1.startMs..clip1.endMs step 50L) {
+            val transform = keyframeEngine.evaluateTransformAt(timeline, sampleMs, EasingType.CUBIC_HERMITE)
+            assertFalse("Zoom must not be NaN", transform.zoom.isNaN())
+            assertFalse("FocusX must not be NaN", transform.focusX.isNaN())
+            assertFalse("FocusY must not be NaN", transform.focusY.isNaN())
+            assertTrue("Zoom must stay within safe bounds", transform.zoom in 1.0f..1.5f)
+
+            if (prevZoom > 0f) {
+                // Ensure no abrupt single-frame jumps between consecutive 50ms steps (< 0.15 zoom change / step)
+                val zoomDelta = abs(transform.zoom - prevZoom)
+                assertTrue("Zoom must change smoothly without jumps: delta was $zoomDelta", zoomDelta < 0.15f)
+            }
+            prevZoom = transform.zoom
+            prevX = transform.offsetXFloat
+            prevY = transform.offsetYFloat
+        }
+
+        // 4. Verify manual keyframe editing preservation
+        val manuallyEdited = keyframeEngine.rebuildSegmentKeyframes(
+            segment = clip1,
+            newDirection = CameraDirection.LEFT,
+            newStartZoom = 1.05f,
+            newPeakZoom = 1.20f,
+            newSubjectX = 0.42f,
+            newSubjectY = 0.55f,
+            keepSubjectInSafeZone = true
+        )
+        assertTrue("Manual edits must mark isModifiedManually = true", manuallyEdited.isModifiedManually)
+        assertEquals(CameraDirection.LEFT, manuallyEdited.cameraDirection)
+        assertEquals(1.05f, manuallyEdited.keyframeA.zoom, 1e-4f)
+        assertEquals(1.20f, manuallyEdited.smartZoomPeak, 1e-4f)
+    }
 }
