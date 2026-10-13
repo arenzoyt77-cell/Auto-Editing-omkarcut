@@ -85,7 +85,7 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun alternatingCameraDirection_andDynamicSmoothZoomCurve_behaveLikeEditorMadeCameraZoom() {
+    fun alternatingCameraDirection_andExactPresetFraming_withoutExtraZoomAnimation() {
         val engine = KeyframeEditingEngine()
         val rawSegments = listOf(
             RawSpeechSegment(0L, 3500L, "MALE: \"Aare ruko, tum kaha ja rahe ho? Pehle meri baat suno.\"", 0.92f, -6f, SpeakerIdentity.MALE),
@@ -110,75 +110,56 @@ class ExampleUnitTest {
         val timeline = engine.generateSegmentedTimeline(
             rawSegments = rawSegments,
             subjectRegions = subjects,
-            config = AutoCutConfig(enforceExactKeyframeSettings = false)
+            config = AutoCutConfig()
         )
 
         assertEquals(4, timeline.size)
-        assertEquals(CameraDirection.RIGHT, timeline[0].cameraDirection)
-        assertEquals(CameraDirection.LEFT, timeline[1].cameraDirection)
-        assertEquals(CameraDirection.RIGHT, timeline[2].cameraDirection)
-        assertEquals(CameraDirection.LEFT, timeline[3].cameraDirection)
+        // Sequence: Clip 1 LEFT, Clip 2 RIGHT, Clip 3 LEFT, Clip 4 RIGHT
+        assertEquals(CameraDirection.LEFT, timeline[0].cameraDirection)
+        assertEquals(CameraDirection.RIGHT, timeline[1].cameraDirection)
+        assertEquals(CameraDirection.LEFT, timeline[2].cameraDirection)
+        assertEquals(CameraDirection.RIGHT, timeline[3].cameraDirection)
 
-        timeline.forEach { seg ->
-            // Subtle, cinematic peak zoom in [1.08 .. 1.15]
-            assertTrue("Smart zoom (${seg.smartZoomPeak}) should be >= 1.08x", seg.smartZoomPeak >= 1.08f)
-            assertTrue("Smart zoom (${seg.smartZoomPeak}) should be <= 1.15x", seg.smartZoomPeak <= 1.15f)
+        timeline.forEachIndexed { idx, seg ->
+            val expectedDir = if (idx % 2 == 0) CameraDirection.LEFT else CameraDirection.RIGHT
+            val expectedZoom = expectedDir.presetZoom
+            val expectedX = expectedDir.presetOffsetX
+            val expectedY = expectedDir.presetOffsetY
 
-            // Automatically calculated zoom start, peak, hold-end, and end times
-            assertEquals(seg.startMs, seg.zoomStartTimeMs)
-            assertTrue(seg.zoomPeakTimeMs > seg.zoomStartTimeMs)
-            assertTrue(seg.zoomHoldEndTimeMs > seg.zoomPeakTimeMs)
-            assertEquals(seg.endMs, seg.zoomEndTimeMs)
+            assertEquals(expectedDir, seg.cameraDirection)
+            assertEquals(expectedZoom, seg.presetZoom, 1e-4f)
+            assertEquals(expectedX, seg.presetOffsetX)
+            assertEquals(expectedY, seg.presetOffsetY)
 
-            // 1. Start of segment: Scale = 1.00
-            val startTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomStartTimeMs * 1000L, EasingType.CUBIC_HERMITE)
-            assertEquals("Start of segment must start at 1.00x", 1.00f, startTransform.zoom, 0.002f)
+            // 1. Start of segment: fixed preset scale and position without extra zoom-in animation
+            val startTransform = engine.evaluateTransformAtUs(listOf(seg), seg.startMs * 1000L, EasingType.CUBIC_HERMITE)
+            assertEquals("Start of segment must maintain fixed preset zoom", expectedZoom, startTransform.zoom, 0.002f)
+            assertEquals("Start of segment offsetX", expectedX, startTransform.offsetX)
+            assertEquals("Start of segment offsetY", expectedY, startTransform.offsetY)
 
-            // 2. Early/middle peak time: Smoothly increased toward 1.08–1.15
-            val peakInTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomPeakTimeMs * 1000L, EasingType.CUBIC_HERMITE)
-            assertTrue("At zoomPeakTimeMs, zoom (${peakInTransform.zoom}) must reach zoomed framing", peakInTransform.zoom >= 1.075f)
+            // 2. Middle of segment: holds constant fixed preset framing
+            val midUs = ((seg.startMs + seg.endMs) * 1000L) / 2L
+            val midTransform = engine.evaluateTransformAtUs(listOf(seg), midUs, EasingType.CUBIC_HERMITE)
+            assertEquals("Middle of segment must maintain fixed preset zoom", expectedZoom, midTransform.zoom, 0.002f)
+            assertEquals("Middle of segment offsetX", expectedX, midTransform.offsetX)
+            assertEquals("Middle of segment offsetY", expectedY, midTransform.offsetY)
 
-            // 3. Middle hold phase: Holds / very slowly continues
-            val holdEndTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomHoldEndTimeMs * 1000L, EasingType.CUBIC_HERMITE)
-            assertEquals(seg.smartZoomPeak, holdEndTransform.zoom, 0.002f)
-            assertTrue("Middle hold should hold or slowly continue from peak-in", holdEndTransform.zoom >= peakInTransform.zoom)
+            // 3. End of segment: holds constant fixed preset framing without extra zoom-out
+            val endTransform = engine.evaluateTransformAtUs(listOf(seg), seg.endMs * 1000L, EasingType.CUBIC_HERMITE)
+            assertEquals("End of segment must maintain fixed preset zoom", expectedZoom, endTransform.zoom, 0.002f)
+            assertEquals("End of segment offsetX", expectedX, endTransform.offsetX)
+            assertEquals("End of segment offsetY", expectedY, endTransform.offsetY)
 
-            // 4. End of segment: Smoothly returns to 1.00
-            val endTransform = engine.evaluateTransformAtUs(listOf(seg), seg.zoomEndTimeMs * 1000L, EasingType.CUBIC_HERMITE)
-            assertEquals("End of segment must smoothly return to 1.00x", 1.00f, endTransform.zoom, 0.002f)
-
-            // 5. Verify 30fps frame-by-frame smoothness: no sudden scale jumps or abrupt crop changes,
-            //    and subject remains properly centered/framed inside the zoomed viewport at all times.
+            // 4. Verify 30fps frame-by-frame stability: fixed preset framing remains stable throughout clip
             val frameStepUs = 33_333L
-            var prevTransform = startTransform
             var tUs = seg.startMs * 1000L + frameStepUs
             while (tUs <= seg.endMs * 1000L) {
                 val curr = engine.evaluateTransformAtUs(listOf(seg), tUs, EasingType.CUBIC_HERMITE)
-                val deltaZoom = abs(curr.zoom - prevTransform.zoom)
-                val deltaFocusX = abs(curr.focusX - prevTransform.focusX)
-                val deltaFocusY = abs(curr.focusY - prevTransform.focusY)
-
-                assertTrue("No sudden scale jump between consecutive 30fps frames (delta=$deltaZoom)", deltaZoom < 0.012f)
-                assertTrue("No sudden horizontal crop jump between consecutive 30fps frames (delta=$deltaFocusX)", deltaFocusX < 0.012f)
-                assertTrue("No sudden vertical crop jump between consecutive 30fps frames (delta=$deltaFocusY)", deltaFocusY < 0.012f)
-
-                // Verify subject center stays well inside the visible zoomed crop window [focusX - halfView, focusX + halfView]
-                val halfView = 0.5f / curr.zoom
-                assertTrue("Subject X must remain framed inside zoomed crop", curr.subjectCenterX in (curr.focusX - halfView)..(curr.focusX + halfView))
-                assertTrue("Subject Y must remain framed inside zoomed crop", curr.subjectCenterY in (curr.focusY - halfView)..(curr.focusY + halfView))
-
-                prevTransform = curr
+                assertEquals("Frame-by-frame zoom remains at fixed preset", expectedZoom, curr.zoom, 0.002f)
+                assertEquals("Frame-by-frame offsetX remains at fixed preset", expectedX, curr.offsetX)
+                assertEquals("Frame-by-frame offsetY remains at fixed preset", expectedY, curr.offsetY)
                 tUs += frameStepUs
             }
-
-            // 6. Verify that as subject moves from startCenterX (0.40) to endCenterX (0.58) during zoomed hold,
-            //    the camera crop/focus position smoothly follows the moving subject
-            val earlyHoldUs = (seg.zoomPeakTimeMs * 1000L)
-            val lateHoldUs = (seg.zoomHoldEndTimeMs * 1000L)
-            val earlyHold = engine.evaluateTransformAtUs(listOf(seg), earlyHoldUs, EasingType.CUBIC_HERMITE)
-            val lateHold = engine.evaluateTransformAtUs(listOf(seg), lateHoldUs, EasingType.CUBIC_HERMITE)
-            assertTrue("Tracked subject X should move right over time", lateHold.subjectCenterX > earlyHold.subjectCenterX)
-            assertTrue("Camera focusX should smoothly follow the rightward-moving subject", lateHold.focusX > earlyHold.focusX)
         }
     }
 
@@ -186,13 +167,9 @@ class ExampleUnitTest {
     fun professionalSmoothLeftRightKeyframes_centeredLeftRightMovingSubjects_andPreviewExportParity() {
         val engine = KeyframeEditingEngine()
         val rawSegments = listOf(
-            // 1. Centered subject (RIGHT camera movement)
             RawSpeechSegment(0L, 3000L, "Speaker 1 centered", 0.93f, -6f, SpeakerIdentity.MALE),
-            // 2. Left subject (LEFT camera movement)
             RawSpeechSegment(3000L, 6000L, "Speaker 2 left", 0.92f, -6f, SpeakerIdentity.FEMALE),
-            // 3. Right subject (RIGHT camera movement)
             RawSpeechSegment(6000L, 9000L, "Speaker 1 right", 0.94f, -5f, SpeakerIdentity.MALE),
-            // 4. Moving subject (LEFT camera movement)
             RawSpeechSegment(9000L, 12500L, "Speaker 2 moving", 0.91f, -6f, SpeakerIdentity.FEMALE)
         )
         val subjects = listOf(
@@ -205,56 +182,56 @@ class ExampleUnitTest {
         val timeline = engine.generateSegmentedTimeline(
             rawSegments = rawSegments,
             subjectRegions = subjects,
-            config = AutoCutConfig(enforceExactKeyframeSettings = false)
+            config = AutoCutConfig()
         )
 
-        // Verify centered subject with RIGHT vs LEFT produces clean, distinct directional glide
-        val centeredRightPeak = engine.evaluateTransformAtUs(listOf(timeline[0]), timeline[0].zoomHoldEndTimeMs * 1000L)
-        assertTrue("Centered subject with RIGHT movement should glide right of 0.50", centeredRightPeak.focusX > 0.503f)
+        // Clip 1 (index 0) is LEFT (+43, -14, 108%)
+        assertEquals(CameraDirection.LEFT, timeline[0].cameraDirection)
+        val clip1Transform = engine.evaluateTransformAtUs(listOf(timeline[0]), 1500_000L)
+        assertEquals(43, clip1Transform.offsetX)
+        assertEquals(-14, clip1Transform.offsetY)
+        assertEquals(1.08f, clip1Transform.zoom, 1e-4f)
 
-        // Verify left subject (0.35) is smoothly framed on the left
-        val leftSubjectPeak = engine.evaluateTransformAtUs(listOf(timeline[1]), timeline[1].zoomHoldEndTimeMs * 1000L)
-        assertTrue("Left subject (0.35) should smoothly pan left of 0.50", leftSubjectPeak.focusX < 0.485f)
+        // Clip 2 (index 1) is RIGHT (-87, +18, 117%)
+        assertEquals(CameraDirection.RIGHT, timeline[1].cameraDirection)
+        val clip2Transform = engine.evaluateTransformAtUs(listOf(timeline[1]), 4500_000L)
+        assertEquals(-87, clip2Transform.offsetX)
+        assertEquals(18, clip2Transform.offsetY)
+        assertEquals(1.17f, clip2Transform.zoom, 1e-4f)
 
-        // Verify right subject (0.65) is smoothly framed on the right
-        val rightSubjectPeak = engine.evaluateTransformAtUs(listOf(timeline[2]), timeline[2].zoomHoldEndTimeMs * 1000L)
-        assertTrue("Right subject (0.65) should smoothly pan right of 0.50", rightSubjectPeak.focusX > 0.515f)
-
-        // Verify continuous 60fps smoothness across all 4 segments, including smooth zoom-out and boundary transitions
+        // Verify continuous smoothness and preview/export parity across all 4 segments
         val step60FpsUs = 16_667L
-        for (seg in timeline) {
-            var prev = engine.evaluateTransformAtUs(timeline, seg.startMs * 1000L)
-            assertEquals(1.00f, prev.zoom, 0.002f)
-            assertEquals(0.50f, prev.focusX, 0.002f)
-
-            var tUs = seg.startMs * 1000L + step60FpsUs
-            var prevZoomOutScale = engine.evaluateTransformAtUs(timeline, seg.zoomHoldEndTimeMs * 1000L).zoom
+        for (i in timeline.indices) {
+            val seg = timeline[i]
+            var tUs = seg.startMs * 1000L
             while (tUs <= seg.endMs * 1000L) {
-                val curr = engine.evaluateTransformAtUs(timeline, tUs)
-                // Micro-step continuity at 60fps: never snaps or shakes
-                assertTrue("Smooth 60fps zoom step", abs(curr.zoom - prev.zoom) < 0.006f)
-                assertTrue("Smooth 60fps focusX step", abs(curr.focusX - prev.focusX) < 0.006f)
-                assertTrue("Smooth 60fps focusY step", abs(curr.focusY - prev.focusY) < 0.006f)
+                val previewEval = engine.evaluateTransformAtUs(timeline, tUs)
+                val exportEval = engine.evaluateTransformAtUs(timeline, tUs, segmentIndexHint = i)
+                assertEquals(previewEval.zoom, exportEval.zoom, 1e-5f)
+                assertEquals(previewEval.focusX, exportEval.focusX, 1e-5f)
+                assertEquals(previewEval.focusY, exportEval.focusY, 1e-5f)
+                assertEquals(previewEval.offsetX, exportEval.offsetX)
+                assertEquals(previewEval.offsetY, exportEval.offsetY)
 
-                // During zoom-out phase, zoom scale must monotonically and smoothly decrease back to 1.00x
-                if (tUs > seg.zoomHoldEndTimeMs * 1000L) {
-                    assertTrue("Zoom-out must monotonically decrease without rebounds", curr.zoom <= prevZoomOutScale + 1e-5f)
-                    prevZoomOutScale = curr.zoom
-                }
-                prev = curr
+                val prevPanX = com.example.model.KeyframeCoordinateMapper.computeViewportTranslationX(previewEval, 1080f)
+                val prevPanY = com.example.model.KeyframeCoordinateMapper.computeViewportTranslationY(previewEval, 1920f)
+                val exportParams = VideoRenderingEngine.computeFrameRenderTransformParams(
+                    sourceWidth = 1080,
+                    sourceHeight = 1920,
+                    outWidth = 1080,
+                    outHeight = 1920,
+                    transform = exportEval
+                )
+                assertEquals(prevPanX, exportParams.translationX, 1e-4f)
+                assertEquals(prevPanY, exportParams.translationY, 1e-4f)
                 tUs += step60FpsUs
             }
-
-            val endAtBoundary = engine.evaluateTransformAtUs(timeline, seg.endMs * 1000L)
-            assertEquals("Segment end must smoothly return to 1.00x zoom", 1.00f, endAtBoundary.zoom, 0.002f)
-            assertEquals("Segment end must smoothly return to 0.50 focusX", 0.50f, endAtBoundary.focusX, 0.002f)
         }
     }
 
     @Test
     fun referenceMatchedKeyframes_firstAndLastBoundaryContinuity_adaptiveZoom_andPreviewExportParity() {
         val engine = KeyframeEditingEngine()
-        // Simulate reference-style multi-turn dialogue with varying durations, vocal energy, and left/right subjects
         val rawSegments = listOf(
             RawSpeechSegment(0L, 2100L, "FEMALE: \"Are ruko!\"", 0.90f, -8f, SpeakerIdentity.FEMALE),
             RawSpeechSegment(2100L, 4200L, "FEMALE: \"Are merko headshot mat marna\"", 0.95f, -4f, SpeakerIdentity.FEMALE),
@@ -273,14 +250,22 @@ class ExampleUnitTest {
         val timeline = engine.generateSegmentedTimeline(
             rawSegments = rawSegments,
             subjectRegions = subjects,
-            config = AutoCutConfig(enforceExactKeyframeSettings = false)
+            config = AutoCutConfig()
         )
 
-        // 1. Adaptive zoom & timing: segments must NOT all share one fixed zoom or identical normalized peak time
-        val distinctZooms = timeline.map { (it.smartZoomPeak * 1000).toInt() }.toSet()
-        assertTrue("Adaptive camera framing must vary zoom across different segments", distinctZooms.size >= 3)
+        // Verify chronological alternation: LEFT, RIGHT, LEFT, RIGHT, LEFT
+        val expectedDirs = listOf(
+            CameraDirection.LEFT,
+            CameraDirection.RIGHT,
+            CameraDirection.LEFT,
+            CameraDirection.RIGHT,
+            CameraDirection.LEFT
+        )
+        for (i in timeline.indices) {
+            assertEquals("Clip ${i + 1} direction", expectedDirs[i], timeline[i].cameraDirection)
+        }
 
-        // 2. First and last boundary keyframes exist at exact segment startMs and endMs and match across contiguous splits
+        // Boundary keyframes exist at exact segment startMs and endMs without invented timestamps
         for (i in timeline.indices) {
             val seg = timeline[i]
             assertEquals("First keyframe timestamp must equal segment startMs", seg.startMs, seg.keyframeA.timestampMs)
@@ -288,29 +273,9 @@ class ExampleUnitTest {
             assertEquals(0.0f, seg.keyframeA.normalizedTime, 1e-4f)
             assertEquals(1.0f, seg.endKeyframe.normalizedTime, 1e-4f)
 
-            if (i < timeline.size - 1) {
-                val nextSeg = timeline[i + 1]
-                assertEquals("Contiguous split zoom must match", seg.endKeyframe.zoom, nextSeg.keyframeA.zoom, 1e-4f)
-                assertEquals("Contiguous split focusX must match", seg.endKeyframe.focusX, nextSeg.keyframeA.focusX, 1e-4f)
-                assertEquals("Contiguous split focusY must match", seg.endKeyframe.focusY, nextSeg.keyframeA.focusY, 1e-4f)
-
-                // Verify consecutive frames right across the split boundary have zero jump
-                val frameUs = 33_333L
-                val beforeSplit = engine.evaluateTransformAtUs(timeline, seg.endMs * 1000L - frameUs, EasingType.CUBIC_HERMITE, i)
-                val atSplitEnd = engine.evaluateTransformAtUs(timeline, seg.endMs * 1000L, EasingType.CUBIC_HERMITE, i)
-                val atSplitStart = engine.evaluateTransformAtUs(timeline, nextSeg.startMs * 1000L, EasingType.CUBIC_HERMITE, i + 1)
-                val afterSplit = engine.evaluateTransformAtUs(timeline, nextSeg.startMs * 1000L + frameUs, EasingType.CUBIC_HERMITE, i + 1)
-
-                assertEquals("End of seg i and start of seg i+1 must have identical zoom", atSplitEnd.zoom, atSplitStart.zoom, 1e-4f)
-                assertEquals("End of seg i and start of seg i+1 must have identical focusX", atSplitEnd.focusX, atSplitStart.focusX, 1e-4f)
-                assertEquals("End of seg i and start of seg i+1 must have identical focusY", atSplitEnd.focusY, atSplitStart.focusY, 1e-4f)
-                assertTrue("Frame before split to split must be smooth", abs(atSplitStart.zoom - beforeSplit.zoom) < 0.005f)
-                assertTrue("Split to frame after split must be smooth", abs(afterSplit.zoom - atSplitStart.zoom) < 0.005f)
-            }
-
-            // 3. Preview vs Export parity across every frame of the segment
+            // Preview vs Export parity across every frame of the segment
             var tUs = seg.startMs * 1000L
-            while (tUs < seg.endMs * 1000L) {
+            while (tUs <= seg.endMs * 1000L) {
                 val previewTransform = engine.evaluateTransformAtUs(timeline, tUs, EasingType.CUBIC_HERMITE)
                 val exportTransform = engine.evaluateTransformAtUs(timeline, tUs, EasingType.CUBIC_HERMITE, segmentIndexHint = i)
                 assertEquals(previewTransform.zoom, exportTransform.zoom, 1e-5f)
@@ -320,21 +285,17 @@ class ExampleUnitTest {
             }
         }
 
-        // 4. Verify non-1.00x shared boundary keyframe preservation & continuity across splits
+        // Verify manual keyframe editing preservation
         val modifiedSecondSeg = engine.rebuildSegmentKeyframes(
             segment = timeline[1],
+            newDirection = CameraDirection.LEFT,
             newStartZoom = 1.05f,
             newPeakZoom = 1.14f
         )
-        val updatedTimeline = engine.synchronizeConsecutiveBoundaryKeyframes(
-            timeline.toMutableList().apply { this[1] = modifiedSecondSeg }
-        )
-        assertEquals("Previous segment endKeyframe zoom must sync with next segment startZoom", 1.05f, updatedTimeline[0].endKeyframe.zoom, 1e-4f)
-        val seg0EndEval = engine.evaluateTransformAtUs(updatedTimeline, updatedTimeline[0].endMs * 1000L, EasingType.CUBIC_HERMITE, 0)
-        val seg1StartEval = engine.evaluateTransformAtUs(updatedTimeline, updatedTimeline[1].startMs * 1000L, EasingType.CUBIC_HERMITE, 1)
-        assertEquals(1.05f, seg0EndEval.zoom, 1e-4f)
-        assertEquals(seg0EndEval.zoom, seg1StartEval.zoom, 1e-4f)
-        assertEquals(seg0EndEval.focusX, seg1StartEval.focusX, 1e-4f)
+        assertTrue(modifiedSecondSeg.isModifiedManually)
+        val updatedTimeline = timeline.toMutableList().apply { this[1] = modifiedSecondSeg }
+        val seg1Eval = engine.evaluateTransformAtUs(updatedTimeline, updatedTimeline[1].startMs * 1000L, EasingType.CUBIC_HERMITE, 1)
+        assertEquals(1.05f, seg1Eval.zoom, 1e-4f)
     }
 
     @Test
@@ -593,12 +554,12 @@ class ExampleUnitTest {
         )
         assertEquals(26, timeline.size)
 
-        // BUG 2: Verify exact alternating RIGHT/LEFT presets across all 26 clips in chronological order:
-        // RIGHT: X = -87, Y = +18, Zoom = 117%
-        // LEFT:  X = +43, Y = -14, Zoom = 108%
-        // Sequence: Clip 1 RIGHT, Clip 2 LEFT, Clip 3 RIGHT, Clip 4 LEFT ... Clip 26 LEFT
+        // Verify exact alternating LEFT/RIGHT presets across all 26 clips in chronological order:
+        // Clip 1 LEFT:  X = +43, Y = -14, Zoom = 108%
+        // Clip 2 RIGHT: X = -87, Y = +18, Zoom = 117%
+        // Sequence: Clip 1 LEFT, Clip 2 RIGHT, Clip 3 LEFT, Clip 4 RIGHT ... Clip 26 RIGHT
         for ((idx, seg) in timeline.withIndex()) {
-            val expectedDir = if (idx % 2 == 0) CameraDirection.RIGHT else CameraDirection.LEFT
+            val expectedDir = if (idx % 2 == 0) CameraDirection.LEFT else CameraDirection.RIGHT
             val expX = if (expectedDir == CameraDirection.RIGHT) -87 else 43
             val expY = if (expectedDir == CameraDirection.RIGHT) 18 else -14
             val expZoomPct = if (expectedDir == CameraDirection.RIGHT) 117 else 108

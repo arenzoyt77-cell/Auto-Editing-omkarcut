@@ -349,8 +349,8 @@ fun ImportInspectScreen(
                 }
                 Text(
                     text = "• Rule 1 — Explicit (split) Boundaries Only: ${parsedSplitResult.segments.size} dialogue clips (${parsedSplitResult.rawMarkerCount} markers; never auto-splits at punctuation/pauses)\n" +
-                        "• Rule 2 — Fixed Presets by Clip Index: Clip 1 RIGHT (X -87, Y +18, Zoom 117%) ↔ Clip 2 LEFT (X +43, Y -14, Zoom 108%)\n" +
-                        "• Rule 3 — Exact Preset Keyframes: RIGHT (X -87, Y +18, Zoom 117%) ↔ LEFT (X +43, Y -14, Zoom 108%) with smooth interpolation\n" +
+                        "• Rule 2 — Fixed Presets by Clip Index: Clip 1 LEFT (X +43, Y -14, Zoom 108%) ↔ Clip 2 RIGHT (X -87, Y +18, Zoom 117%)\n" +
+                        "• Rule 3 — Exact Preset Framing: LEFT (X +43, Y -14, Zoom 108%) ↔ RIGHT (X -87, Y +18, Zoom 117%) without extra zoom animation\n" +
                         "• Rule 4 — $timingStatusText",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
@@ -371,7 +371,7 @@ fun ImportInspectScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         displayedClips.forEach { clip ->
-                            val presetDir = if (clip.index % 2 == 0) "RIGHT (X -87, Y +18, 117%)" else "LEFT (X +43, Y -14, 108%)"
+                            val presetDir = if (clip.index % 2 == 0) "LEFT (X +43, Y -14, 108%)" else "RIGHT (X -87, Y +18, 117%)"
                             Text(
                                 text = "Clip ${clip.clipNumber}: ${clip.text}  [$presetDir]",
                                 style = MaterialTheme.typography.labelSmall,
@@ -381,7 +381,7 @@ fun ImportInspectScreen(
                         }
                         if (!showAllPreviewClips && parsedSplitResult.segments.size > 5) {
                             val lastClip = parsedSplitResult.segments.last()
-                            val lastPreset = if (lastClip.index % 2 == 0) "RIGHT" else "LEFT"
+                            val lastPreset = if (lastClip.index % 2 == 0) "LEFT" else "RIGHT"
                             Text(
                                 text = "... +${parsedSplitResult.segments.size - 6} more clips ... → Clip ${lastClip.clipNumber}: ${lastClip.text} [$lastPreset]",
                                 style = MaterialTheme.typography.labelSmall,

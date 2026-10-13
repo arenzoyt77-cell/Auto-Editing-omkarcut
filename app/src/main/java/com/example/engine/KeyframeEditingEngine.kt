@@ -88,9 +88,9 @@ class KeyframeEditingEngine {
         /**
          * Legacy 3-keyframe constants preserved for backward compatibility if referenced directly.
          */
-        val EXACT_KEYFRAME_1 = RIGHT_PRESET_KEYFRAME
+        val EXACT_KEYFRAME_1 = LEFT_PRESET_KEYFRAME
         val EXACT_KEYFRAME_2 = RIGHT_PRESET_KEYFRAME.copy(normalizedTime = 0.5f, label = "Keyframe 2")
-        val EXACT_KEYFRAME_3 = RIGHT_PRESET_KEYFRAME.copy(normalizedTime = 1.0f, label = "Keyframe 3")
+        val EXACT_KEYFRAME_3 = LEFT_PRESET_KEYFRAME.copy(normalizedTime = 1.0f, label = "Keyframe 3")
 
         val EXACT_KEYFRAME_SEQUENCE: List<CameraKeyframe> = listOf(
             EXACT_KEYFRAME_1,
@@ -100,10 +100,10 @@ class KeyframeEditingEngine {
 
         /**
          * Assigns the exact fixed LEFT/RIGHT preset to each clip according to its chronological index:
-         * Clip 1 (index 0) -> RIGHT (X = -87, Y = +18, Zoom = 117%)
-         * Clip 2 (index 1) -> LEFT  (X = +43, Y = -14, Zoom = 108%)
-         * Clip 3 (index 2) -> RIGHT (X = -87, Y = +18, Zoom = 117%)
-         * Clip 4 (index 3) -> LEFT  (X = +43, Y = -14, Zoom = 108%)
+         * Clip 1 (index 0) -> LEFT  (X = +43, Y = -14, Zoom = 108%)
+         * Clip 2 (index 1) -> RIGHT (X = -87, Y = +18, Zoom = 117%)
+         * Clip 3 (index 2) -> LEFT  (X = +43, Y = -14, Zoom = 108%)
+         * Clip 4 (index 3) -> RIGHT (X = -87, Y = +18, Zoom = 117%)
          * Continues alternating until the final clip.
          */
         fun fixedDirectionForClipIndex(
@@ -113,7 +113,7 @@ class KeyframeEditingEngine {
             if (presetSequence.isNotEmpty()) {
                 return presetSequence[clipIndex.coerceAtLeast(0) % presetSequence.size]
             }
-            return if (clipIndex % 2 == 0) CameraDirection.RIGHT else CameraDirection.LEFT
+            return if (clipIndex % 2 == 0) CameraDirection.LEFT else CameraDirection.RIGHT
         }
 
         /**
@@ -257,136 +257,21 @@ class KeyframeEditingEngine {
                 )
             }
 
-            // Assign the exact fixed RIGHT/LEFT preset to each clip in chronological order:
-            // Clip 1 RIGHT (X = -87, Y = +18, Zoom = 117%), Clip 2 LEFT (X = +43, Y = -14, Zoom = 108%), ...
+            // Assign the exact fixed LEFT/RIGHT preset to each clip in chronological order:
+            // Clip 1 LEFT (X = +43, Y = -14, Zoom = 108%), Clip 2 RIGHT (X = -87, Y = +18, Zoom = 117%), ...
             val direction = fixedDirectionForClipIndex(i, config.fixedDirectionPresets)
             val cleanPhrase = ExplicitSplitMarkerParser.stripSplitMarkers(raw.spokenPhrase)
 
-            if (config.enforceExactKeyframeSettings) {
-                // Store the exact RIGHT / LEFT preset values directly in the clip's transform and keyframes
-                // without changing them based on speaker identity, scene, or AI estimates.
-                val (kf1, kf2, kf3) = buildPresetKeyframesForDirection(
-                    direction = direction,
-                    startMs = raw.startMs,
-                    endMs = raw.endMs,
-                    explicitTimestampsMs = config.exactKeyframeTimestampsMs
-                )
-                val midMs = raw.startMs + ((raw.endMs - raw.startMs) / 2L)
-                val resolvedPeakTimeMs = if (kf2.hasExplicitTimestamp && kf2.timestampMs >= 0L) kf2.timestampMs else midMs
-
-                segments.add(
-                    VideoSegment(
-                        id = i + 1,
-                        index = i,
-                        startMs = raw.startMs,
-                        endMs = raw.endMs,
-                        spokenPhrase = cleanPhrase,
-                        speechConfidence = raw.confidence,
-                        peakDb = raw.peakDb,
-                        subjectRegion = subject,
-                        cameraDirection = direction,
-                        keyframeA = kf1,
-                        keyframeB = kf2,
-                        smartZoomPeak = direction.presetZoom,
-                        zoomStartTimeMs = if (kf1.hasExplicitTimestamp && kf1.timestampMs >= 0L) kf1.timestampMs else raw.startMs,
-                        zoomPeakTimeMs = resolvedPeakTimeMs,
-                        zoomHoldEndTimeMs = resolvedPeakTimeMs,
-                        zoomEndTimeMs = if (kf3.hasExplicitTimestamp && kf3.timestampMs >= 0L) kf3.timestampMs else raw.endMs,
-                        endKeyframe = kf3,
-                        presetOffsetX = direction.presetOffsetX,
-                        presetOffsetY = direction.presetOffsetY,
-                        presetZoomPercent = direction.presetZoomPercent,
-                        presetZoom = direction.presetZoom,
-                        isModifiedManually = false,
-                        autoDefaultDirection = direction,
-                        autoDefaultZoomPeak = direction.presetZoom,
-                        autoDefaultSubjectX = subject.startCenterX,
-                        autoDefaultSubjectY = subject.startCenterY,
-                        autoDefaultStartMs = raw.startMs,
-                        autoDefaultEndMs = raw.endMs,
-                        alignmentStatus = raw.alignmentStatus,
-                        needsTimingCorrection = raw.needsCorrection
-                    )
-                )
-                continue
-            }
-
-            // Legacy adaptive camera calculation (only used when enforceExactKeyframeSettings == false)
-            val zoomTiming = calculateSegmentZoomTiming(
+            // Store the exact LEFT / RIGHT preset values directly in the clip's transform and keyframes
+            // without changing them based on speaker identity, scene, or AI estimates.
+            val (kf1, kf2, kf3) = buildPresetKeyframesForDirection(
+                direction = direction,
                 startMs = raw.startMs,
                 endMs = raw.endMs,
-                subject = subject,
-                config = config,
-                peakDb = raw.peakDb,
-                speechConfidence = raw.confidence
+                explicitTimestampsMs = config.exactKeyframeTimestampsMs
             )
-            val smartZoomPeak = zoomTiming.zoomPeakScale
-            val startZoom = config.minZoom.coerceIn(1.00f, 1.04f)
-
-            val clampedStartFocus = clampFocusToKeepSubjectVisible(
-                desiredFocusX = 0.50f,
-                desiredFocusY = 0.50f,
-                zoom = startZoom,
-                subjectX = subject.startCenterX,
-                subjectY = subject.startCenterY,
-                subjectW = subject.widthRatio,
-                subjectH = subject.heightRatio,
-                enforceSafeZone = config.keepSubjectInSafeZone
-            )
-
-            val midSubjX = (subject.startCenterX + subject.endCenterX) * 0.5f
-            val midSubjY = (subject.startCenterY + subject.endCenterY) * 0.5f
-            val clampedPeakFocus = computeSmoothPeakFocus(
-                subjectX = midSubjX,
-                subjectY = midSubjY,
-                subjectW = subject.widthRatio,
-                subjectH = subject.heightRatio,
-                direction = direction,
-                peakZoom = smartZoomPeak,
-                trackProgress = 0.5f,
-                enforceSafeZone = config.keepSubjectInSafeZone
-            )
-
-            val clampedEndFocus = clampFocusToKeepSubjectVisible(
-                desiredFocusX = 0.50f,
-                desiredFocusY = 0.50f,
-                zoom = startZoom,
-                subjectX = subject.endCenterX,
-                subjectY = subject.endCenterY,
-                subjectW = subject.widthRatio,
-                subjectH = subject.heightRatio,
-                enforceSafeZone = config.keepSubjectInSafeZone
-            )
-
-            val keyframeA = CameraKeyframe(
-                normalizedTime = 0.0f,
-                zoom = startZoom,
-                focusX = clampedStartFocus.first,
-                focusY = clampedStartFocus.second,
-                label = "KEYFRAME A",
-                timestampMs = raw.startMs,
-                hasExplicitTimestamp = true
-            )
-
-            val keyframeB = CameraKeyframe(
-                normalizedTime = 1.0f,
-                zoom = smartZoomPeak,
-                focusX = clampedPeakFocus.first,
-                focusY = clampedPeakFocus.second,
-                label = "KEYFRAME B",
-                timestampMs = zoomTiming.zoomPeakTimeMs,
-                hasExplicitTimestamp = true
-            )
-
-            val endKeyframe = CameraKeyframe(
-                normalizedTime = 1.0f,
-                zoom = startZoom,
-                focusX = clampedEndFocus.first,
-                focusY = clampedEndFocus.second,
-                label = "KEYFRAME END",
-                timestampMs = raw.endMs,
-                hasExplicitTimestamp = true
-            )
+            val midMs = raw.startMs + ((raw.endMs - raw.startMs) / 2L)
+            val resolvedPeakTimeMs = if (kf2.hasExplicitTimestamp && kf2.timestampMs >= 0L) kf2.timestampMs else midMs
 
             segments.add(
                 VideoSegment(
@@ -399,17 +284,21 @@ class KeyframeEditingEngine {
                     peakDb = raw.peakDb,
                     subjectRegion = subject,
                     cameraDirection = direction,
-                    keyframeA = keyframeA,
-                    keyframeB = keyframeB,
-                    smartZoomPeak = smartZoomPeak,
-                    zoomStartTimeMs = zoomTiming.zoomStartTimeMs,
-                    zoomPeakTimeMs = zoomTiming.zoomPeakTimeMs,
-                    zoomHoldEndTimeMs = zoomTiming.zoomHoldEndTimeMs,
-                    zoomEndTimeMs = zoomTiming.zoomEndTimeMs,
-                    endKeyframe = endKeyframe,
+                    keyframeA = kf1,
+                    keyframeB = kf2,
+                    smartZoomPeak = direction.presetZoom,
+                    zoomStartTimeMs = if (kf1.hasExplicitTimestamp && kf1.timestampMs >= 0L) kf1.timestampMs else raw.startMs,
+                    zoomPeakTimeMs = resolvedPeakTimeMs,
+                    zoomHoldEndTimeMs = resolvedPeakTimeMs,
+                    zoomEndTimeMs = if (kf3.hasExplicitTimestamp && kf3.timestampMs >= 0L) kf3.timestampMs else raw.endMs,
+                    endKeyframe = kf3,
+                    presetOffsetX = direction.presetOffsetX,
+                    presetOffsetY = direction.presetOffsetY,
+                    presetZoomPercent = direction.presetZoomPercent,
+                    presetZoom = direction.presetZoom,
                     isModifiedManually = false,
                     autoDefaultDirection = direction,
-                    autoDefaultZoomPeak = smartZoomPeak,
+                    autoDefaultZoomPeak = direction.presetZoom,
                     autoDefaultSubjectX = subject.startCenterX,
                     autoDefaultSubjectY = subject.startCenterY,
                     autoDefaultStartMs = raw.startMs,
@@ -420,10 +309,7 @@ class KeyframeEditingEngine {
             )
         }
 
-        return synchronizeConsecutiveBoundaryKeyframes(
-            segments = segments,
-            keepSubjectInSafeZone = config.keepSubjectInSafeZone
-        )
+        return segments
     }
 
     /**
@@ -970,166 +856,44 @@ class KeyframeEditingEngine {
             .toFloat()
             .coerceIn(0f, 1f)
 
-        if (activeSeg.hasExactKeyframes) {
-            return evaluateExactKeyframeSequenceAtUs(
-                activeSeg = activeSeg,
-                positionUs = positionUs,
-                rawT = rawT,
-                easingType = easingType
+        // Apply the correct fixed preset to every clip without extra zoom-in/zoom-out animation
+        if (!activeSeg.isModifiedManually) {
+            val dir = activeSeg.cameraDirection
+            val fixedZoom = dir.presetZoom
+            val fixedOffsetXFloat = dir.presetOffsetX.toFloat()
+            val fixedOffsetYFloat = dir.presetOffsetY.toFloat()
+            val exactFocusX = KeyframeCoordinateMapper.offsetXToFocusX(fixedOffsetXFloat, fixedZoom)
+            val exactFocusY = KeyframeCoordinateMapper.offsetYToFocusY(fixedOffsetYFloat, fixedZoom)
+            val (liveSubjX, liveSubjY) = activeSeg.subjectRegion.centerAt(rawT)
+
+            return CameraTransform(
+                zoom = fixedZoom,
+                focusX = exactFocusX,
+                focusY = exactFocusY,
+                panOffsetNormX = exactFocusX - 0.5f,
+                panOffsetNormY = exactFocusY - 0.5f,
+                segmentProgress = rawT,
+                activeSegmentIndex = activeSeg.index,
+                direction = dir,
+                subjectCenterX = liveSubjX,
+                subjectCenterY = liveSubjY,
+                subjectWidthRatio = activeSeg.subjectRegion.widthRatio,
+                subjectHeightRatio = activeSeg.subjectRegion.heightRatio,
+                spokenPhrase = activeSeg.spokenPhrase,
+                offsetX = dir.presetOffsetX,
+                offsetY = dir.presetOffsetY,
+                zoomPercent = dir.presetZoomPercent,
+                offsetXFloat = fixedOffsetXFloat,
+                offsetYFloat = fixedOffsetYFloat
             )
         }
 
-        val nextSeg = segments.getOrNull(resolvedListIndex + 1)
-        val isContiguousWithNext = nextSeg != null && !nextSeg.hasExactKeyframes && abs(nextSeg.startMs - activeSeg.endMs) <= 50L
-
-        val segDurationMs = (activeSeg.endMs - activeSeg.startMs).coerceAtLeast(200L)
-        val peakStartNorm = if (activeSeg.zoomPeakTimeMs > activeSeg.startMs && activeSeg.zoomPeakTimeMs < activeSeg.endMs) {
-            ((activeSeg.zoomPeakTimeMs - activeSeg.startMs).toFloat() / segDurationMs.toFloat())
-                .coerceIn(0.22f, 0.45f)
-        } else {
-            0.32f
-        }
-        val holdEndNorm = if (activeSeg.zoomHoldEndTimeMs > activeSeg.zoomPeakTimeMs && activeSeg.zoomHoldEndTimeMs < activeSeg.endMs) {
-            ((activeSeg.zoomHoldEndTimeMs - activeSeg.startMs).toFloat() / segDurationMs.toFloat())
-                .coerceIn(peakStartNorm + 0.15f, 0.80f)
-        } else {
-            0.66f
-        }
-
-        // First boundary keyframe (exact start of segment) and Last boundary keyframe (exact end of segment)
-        val startZoom = activeSeg.keyframeA.zoom.coerceIn(1.00f, 1.25f)
-        val endZoom = if (isContiguousWithNext && nextSeg != null) {
-            nextSeg.keyframeA.zoom.coerceIn(1.00f, 1.25f)
-        } else {
-            activeSeg.endKeyframe.zoom.coerceIn(1.00f, 1.25f)
-        }
-        val peakZoom = max(max(startZoom, endZoom), activeSeg.smartZoomPeak.coerceIn(1.00f, 1.25f))
-
-        // Dynamic 3-stage smooth interpolation between Start Keyframe -> Peak/Hold -> End Keyframe:
-        val holdEntryFraction = 0.985f
-        val currentZoom: Float
-        val phaseBlendToEnd: Float
-        val zoomEnvelope: Float
-
-        when {
-            rawT <= peakStartNorm -> {
-                val localInT = (rawT / peakStartNorm.coerceAtLeast(0.05f)).coerceIn(0f, 1f)
-                val easedIn = applyEasing(localInT, easingType)
-                zoomEnvelope = easedIn * holdEntryFraction
-                currentZoom = lerp(startZoom, peakZoom, zoomEnvelope)
-                phaseBlendToEnd = 0.0f
-            }
-            rawT <= holdEndNorm -> {
-                val localHoldT = ((rawT - peakStartNorm) / (holdEndNorm - peakStartNorm).coerceAtLeast(0.05f))
-                    .coerceIn(0f, 1f)
-                val easedHold = applyEasing(localHoldT, easingType)
-                zoomEnvelope = holdEntryFraction + (1.0f - holdEntryFraction) * easedHold
-                currentZoom = lerp(startZoom, peakZoom, zoomEnvelope)
-                phaseBlendToEnd = easedHold * 0.5f
-            }
-            else -> {
-                val localOutT = ((rawT - holdEndNorm) / (1.0f - holdEndNorm).coerceAtLeast(0.05f))
-                    .coerceIn(0f, 1f)
-                val easedOut = applyEasing(localOutT, easingType)
-                zoomEnvelope = 1.0f - easedOut
-                currentZoom = lerp(endZoom, peakZoom, zoomEnvelope)
-                phaseBlendToEnd = 0.5f + easedOut * 0.5f
-            }
-        }
-
-        // Smoothly follow the moving subject across the segment using continuous ease-in/ease-out
-        val smoothTrackT = applyEasing(rawT, easingType)
-        val (liveSubjX, liveSubjY) = activeSeg.subjectRegion.centerAt(smoothTrackT)
-
-        // Compute dynamic subject-tracked peak focus and incorporate any preserved/custom keyframeB offset
-        val midSubjX = (activeSeg.subjectRegion.startCenterX + activeSeg.subjectRegion.endCenterX) * 0.5f
-        val midSubjY = (activeSeg.subjectRegion.startCenterY + activeSeg.subjectRegion.endCenterY) * 0.5f
-        val defaultMidPeakFocus = computeSmoothPeakFocus(
-            subjectX = midSubjX,
-            subjectY = midSubjY,
-            subjectW = activeSeg.subjectRegion.widthRatio,
-            subjectH = activeSeg.subjectRegion.heightRatio,
-            direction = activeSeg.cameraDirection,
-            peakZoom = max(peakZoom, 1.04f),
-            trackProgress = 0.5f,
-            enforceSafeZone = true
-        )
-        val livePeakFocus = computeSmoothPeakFocus(
-            subjectX = liveSubjX,
-            subjectY = liveSubjY,
-            subjectW = activeSeg.subjectRegion.widthRatio,
-            subjectH = activeSeg.subjectRegion.heightRatio,
-            direction = activeSeg.cameraDirection,
-            peakZoom = max(peakZoom, 1.04f),
-            trackProgress = smoothTrackT,
-            enforceSafeZone = true
-        )
-
-        val customOffsetX = (activeSeg.keyframeB.focusX - defaultMidPeakFocus.first).coerceIn(-0.18f, 0.18f)
-        val customOffsetY = (activeSeg.keyframeB.focusY - defaultMidPeakFocus.second).coerceIn(-0.18f, 0.18f)
-        val clampedPeakTarget = clampFocusToKeepSubjectVisible(
-            desiredFocusX = livePeakFocus.first + customOffsetX,
-            desiredFocusY = livePeakFocus.second + customOffsetY,
-            zoom = max(peakZoom, 1.04f),
-            subjectX = liveSubjX,
-            subjectY = liveSubjY,
-            subjectW = activeSeg.subjectRegion.widthRatio,
-            subjectH = activeSeg.subjectRegion.heightRatio,
-            enforceSafeZone = true
-        )
-
-        // Start & End boundary focus anchors from keyframeA and endKeyframe / nextSeg.keyframeA
-        val startAnchorFocusX = if (startZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusX
-        val startAnchorFocusY = if (startZoom <= 1.001f) 0.50f else activeSeg.keyframeA.focusY
-        val rawEndKeyframe = if (isContiguousWithNext && nextSeg != null) nextSeg.keyframeA else activeSeg.endKeyframe
-        val endAnchorFocusX = if (endZoom <= 1.001f) 0.50f else rawEndKeyframe.focusX
-        val endAnchorFocusY = if (endZoom <= 1.001f) 0.50f else rawEndKeyframe.focusY
-
-        val boundaryAnchorX = lerp(startAnchorFocusX, endAnchorFocusX, phaseBlendToEnd)
-        val boundaryAnchorY = lerp(startAnchorFocusY, endAnchorFocusY, phaseBlendToEnd)
-        val boundaryZoom = lerp(startZoom, endZoom, phaseBlendToEnd)
-
-        // Scale the focus offset by the optical pan capacity ratio above the boundary zoom.
-        // At rawT=0 (currentZoom == startZoom) and rawT=1 (currentZoom == endZoom), panCapacityRatio == 0,
-        // guaranteeing exact agreement with keyframeA at startMs and endKeyframe/nextSeg.keyframeA at endMs.
-        val boundaryPanCapacity = 1.0f - (1.0f / max(boundaryZoom, 1.0001f))
-        val peakPanCapacity = 1.0f - (1.0f / max(peakZoom, 1.001f))
-        val currentPanCapacity = 1.0f - (1.0f / max(currentZoom, 1.0001f))
-        val panSpan = peakPanCapacity - boundaryPanCapacity
-        val panCapacityRatio = if (panSpan > 0.001f) {
-            ((currentPanCapacity - boundaryPanCapacity) / panSpan).coerceIn(0f, 1f)
-        } else {
-            zoomEnvelope.coerceIn(0f, 1f)
-        }
-
-        val rawFocusX = lerp(boundaryAnchorX, clampedPeakTarget.first, panCapacityRatio)
-        val rawFocusY = lerp(boundaryAnchorY, clampedPeakTarget.second, panCapacityRatio)
-
-        val finalFocus = clampFocusToKeepSubjectVisible(
-            desiredFocusX = rawFocusX,
-            desiredFocusY = rawFocusY,
-            zoom = currentZoom,
-            subjectX = liveSubjX,
-            subjectY = liveSubjY,
-            subjectW = activeSeg.subjectRegion.widthRatio,
-            subjectH = activeSeg.subjectRegion.heightRatio,
-            enforceSafeZone = false
-        )
-
-        return CameraTransform(
-            zoom = currentZoom,
-            focusX = finalFocus.first,
-            focusY = finalFocus.second,
-            panOffsetNormX = (finalFocus.first - 0.5f),
-            panOffsetNormY = (finalFocus.second - 0.5f),
-            segmentProgress = rawT,
-            activeSegmentIndex = activeSeg.index,
-            direction = activeSeg.cameraDirection,
-            subjectCenterX = liveSubjX,
-            subjectCenterY = liveSubjY,
-            subjectWidthRatio = activeSeg.subjectRegion.widthRatio,
-            subjectHeightRatio = activeSeg.subjectRegion.heightRatio,
-            spokenPhrase = activeSeg.spokenPhrase
+        // When the segment is manually modified by the user, smoothly interpolate manual keyframes
+        return evaluateExactKeyframeSequenceAtUs(
+            activeSeg = activeSeg,
+            positionUs = positionUs,
+            rawT = rawT,
+            easingType = easingType
         )
     }
 

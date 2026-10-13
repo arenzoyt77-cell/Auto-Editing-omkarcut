@@ -467,13 +467,19 @@ class SpeechTranscriptionEngine {
             onProgress = onProgress
         )
 
-        onProgress(0.65f, "Parsing explicit (split) markers & aligning dialogue to audio...")
+        onProgress(0.65f, "Detecting complete spoken sentence boundaries & speaker turns...")
 
         // Build downsampled 140-bar waveform for UI timeline display
         val waveformBars = buildNormalizedWaveform(vocalRmsBins, targetBars = 140)
 
         val maxEnergy = vocalRmsBins.maxOrNull() ?: 0f
-        if (config.suppliedSplitTranscript.isNotBlank()) {
+
+        // When a split transcript with (split) markers is provided (or for synthetic demo), align with markers;
+        // otherwise, perform full automatic sentence & speaker turn splitting directly from audio.
+        val hasCustomTranscript = config.suppliedSplitTranscript.isNotBlank() &&
+            (metadata.isSyntheticDemo || hasExplicitSplitMarkers(config.suppliedSplitTranscript))
+
+        if (hasCustomTranscript) {
             val parseResult = ExplicitSplitMarkerParser.parseExplicitSplitTranscript(config.suppliedSplitTranscript)
             val suppliedSegments = createSegmentsFromSuppliedSplits(
                 transcriptWithSplits = config.suppliedSplitTranscript,
@@ -1093,23 +1099,26 @@ class SpeechTranscriptionEngine {
             val isTinyFragment = utt.durationMs < 550L && pauseBetweenMs < 450L
 
             val shouldMergeIntoCurrentTurn = when {
-                isSameSpeaker && isMultiSpeakerDialogue -> {
-                    // In a multi-speaker dialogue, keep the entire speaker's turn together
-                    // across sentence pauses unless there is a very long dead silence (>= 2500ms)
-                    pauseBetweenMs < 2500L || prev.durationMs < minTurnDurationMs
+                !isSameSpeaker -> {
+                    // Speaker changed (man <-> girl)! Split cleanly right between the two speakers!
+                    false
                 }
-                isSameSpeaker && !isMultiSpeakerDialogue -> {
-                    // Single-speaker monologue: do NOT split after short words/phrases!
-                    // Keep sentences together unless both a complete turn (>= 2500ms) AND a long pause (>= 1250ms) occur
-                    pauseBetweenMs < 1250L || prev.durationMs < max(minTurnDurationMs, 2500L)
+                pauseBetweenMs < 650L -> {
+                    // Intra-turn clause/sentence gap for the same speaker (< 650ms):
+                    // Keep together so we do NOT split mid-turn or after every clause/sentence!
+                    true
+                }
+                prev.durationMs < 600L -> {
+                    // Previous utterance was shorter than a complete sentence (< 600ms):
+                    // Merge to ensure complete sentence phrasing.
+                    true
                 }
                 isTinyFragment && prev.durationMs < minTurnDurationMs -> {
-                    // Don't split before minimum complete turn duration on a tiny acoustic blip
+                    // Don't create an isolated split on a tiny acoustic fragment
                     true
                 }
                 else -> {
-                    // Speaker changed (e.g. MALE -> FEMALE or FEMALE -> MALE)!
-                    // Keep separate so we create ONE split right between the two speakers' turns!
+                    // Complete spoken sentence or utterance ended (pause >= 650ms)! Split there!
                     false
                 }
             }

@@ -46,9 +46,9 @@ class ExampleRobolectricTest {
     assertEquals("आई लव यू बोल देना तो 2 मिलियन हो जाएंगे।", deserialized[25].spokenPhrase)
     val report = keyframeEngine.validateClipAndKeyframeSettings(deserialized)
     assertTrue(report.isValid)
-    assertEquals("X \"-87\", Y \"+18\", Zoom \"117%\"", deserialized[0].keyframes[0].formattedSummary)
-    assertEquals("X \"+43\", Y \"-14\", Zoom \"108%\"", deserialized[1].keyframes[0].formattedSummary)
-    assertEquals("X \"-87\", Y \"+18\", Zoom \"117%\"", deserialized[2].keyframes[0].formattedSummary)
-    assertEquals("X \"+43\", Y \"-14\", Zoom \"108%\"", deserialized[3].keyframes[0].formattedSummary)
+    assertEquals("X \"+43\", Y \"-14\", Zoom \"108%\"", deserialized[0].keyframes[0].formattedSummary)
+    assertEquals("X \"-87\", Y \"+18\", Zoom \"117%\"", deserialized[1].keyframes[0].formattedSummary)
+    assertEquals("X \"+43\", Y \"-14\", Zoom \"108%\"", deserialized[2].keyframes[0].formattedSummary)
+    assertEquals("X \"-87\", Y \"+18\", Zoom \"117%\"", deserialized[3].keyframes[0].formattedSummary)
   }
 }

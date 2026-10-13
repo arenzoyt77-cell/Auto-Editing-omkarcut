@@ -389,7 +389,7 @@ class AutoCutViewModel(application: Application) : AndroidViewModel(application)
                         currentStepIndex = 5,
                         completedSteps = completed.toSet(),
                         progressPercent = 82,
-                        statusDetail = "Assigning alternating RIGHT / LEFT camera tracking...",
+                        statusDetail = "Assigning alternating LEFT / RIGHT camera tracking...",
                         estimatedRemainingSeconds = 1
                     )
                 )
